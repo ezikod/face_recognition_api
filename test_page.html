@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Face Recognition API Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; background-color: #f5f5f5; }
+        .container { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        h1, h2 { color: #333; }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; }
+        input[type="text"], input[type="file"] { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
+        button { background-color: #4CAF50; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; margin-right: 10px; }
+        button:hover { background-color: #45a049; }
+        .btn-danger { background-color: #f44336; }
+        .btn-danger:hover { background-color: #da190b; }
+        .btn-info { background-color: #2196F3; }
+        .btn-info:hover { background-color: #0b7dda; }
+        .result { margin-top: 20px; padding: 15px; background-color: #f0f0f0; border-radius: 4px; max-height: 800px; overflow-y: auto; }
+        .person-item { display: flex; justify-content: space-between; align-items: center; padding: 10px; border: 1px solid #ddd; margin-bottom: 5px; border-radius: 4px; }
+        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-top: 20px; }
+        .stat-card { background: #f8f9fa; padding: 15px; border-radius: 4px; text-align: center; }
+        .stat-card h3 { margin: 0 0 10px 0; color: #666; }
+        .stat-card .value { font-size: 24px; font-weight: bold; color: #333; }
+    </style>
+</head>
+<body>
+    <h1>🎭 Face Recognition API Test</h1>
+    
+    <div class="container">
+        <h2>➕ Добавить человека</h2>
+        <form id="addPersonForm">
+            <div class="form-group">
+                <label for="personName">Имя:</label>
+                <input type="text" id="personName" required>
+            </div>
+            <div class="form-group">
+                <label for="personPhoto">Фото:</label>
+                <input type="file" id="personPhoto" accept="image/*" required>
+            </div>
+            <button type="submit">Добавить</button>
+        </form>
+        <div id="addResult" class="result" style="display:none;"></div>
+    </div>
+    
+    <div class="container">
+        <h2>🔍 Распознать лицо</h2>
+        <div class="form-group">
+            <label for="recognizePhoto">Фото:</label>
+            <input type="file" id="recognizePhoto" accept="image/*" required>
+        </div>
+        <button type="button" id="recognizeButton">Распознать</button>
+        <div id="recognizeResult" class="result" style="display:none;"></div>
+    </div>
+    
+    <div class="container">
+        <h2>👥 База данных</h2>
+        <button onclick="loadPersons()" class="btn-info">Обновить список</button>
+        <div id="personsList" class="person-list"></div>
+    </div>
+    
+    <div class="container">
+        <h2>📊 Статистика</h2>
+        <button onclick="loadStats()" class="btn-info">Обновить статистику</button>
+        <div id="statsContainer" class="stats"></div>
+    </div>
+
+    <script>
+        console.log("Скрипт успешно загружен и выполняется."); // Проверка, что скрипт работает
+        const API_URL = 'http://127.0.0.1:8000';
+
+        document.getElementById('recognizeButton').addEventListener('click', async () => {
+            const photoFile = document.getElementById('recognizePhoto').files[0];
+            const resultContainer = document.getElementById('recognizeResult');
+
+            if (!photoFile) {
+                alert('Пожалуйста, выберите файл для распознавания.');
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('photo', photoFile);
+            
+            resultContainer.style.display = 'block';
+            resultContainer.innerHTML = '<p>⏳ Распознавание...</p>';
+            
+            try {
+                const response = await fetch(`${API_URL}/api/person/recognize`, {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(`Ошибка сервера: ${response.status}. ${errorText}`);
+                }
+                
+                const result = await response.json();
+                
+                if (!result.success) {
+                    throw new Error(result.message || 'API вернул ошибку без сообщения.');
+                }
+
+                // Очищаем контейнер и выводим заголовок
+                resultContainer.innerHTML = `<h3>${result.message} Найдено лиц: ${result.data.faces_count}</h3>`;
+
+                // Отображаем обработанное изображение
+                if (result.data.processed_image_base64) {
+                    const imgElement = document.createElement('img');
+                    imgElement.src = `data:image/jpeg;base64,${result.data.processed_image_base64}`;
+                    imgElement.style.maxWidth = '100%';
+                    imgElement.style.marginTop = '15px';
+                    imgElement.style.borderRadius = '4px';
+                    resultContainer.appendChild(imgElement);
+                }
+
+                // --- Отображаем информацию о каждом лице и его вектор ---
+                if (result.data && result.data.faces_count > 0) {
+                    const detailsContainer = document.createElement('div');
+                    detailsContainer.style.marginTop = '15px';
+                    
+                    result.data.faces.forEach(face => {
+                        const faceDiv = document.createElement('div');
+                        faceDiv.style.marginBottom = '10px';
+                        
+                        const status = face.name !== "Неизвестный" ? "✅" : "❓";
+                        faceDiv.innerHTML = `<strong>${status} ${face.name}</strong>`;
+                        
+                        if (face.encoding && face.encoding.length > 0) {
+                            const vectorText = document.createElement('p');
+                            vectorText.style.fontSize = '12px';
+                            vectorText.style.wordBreak = 'break-all';
+                            vectorText.style.color = '#555';
+                            // Показываем только первые 8 чисел вектора, чтобы не загромождать экран
+                            vectorText.innerText = `Вектор лица: [${face.encoding.slice(0, 8).join(', ')}, ...]`;
+                            faceDiv.appendChild(vectorText);
+                        }
+                        detailsContainer.appendChild(faceDiv);
+                    });
+                    
+                    resultContainer.appendChild(detailsContainer);
+                }
+
+            } catch (error) {
+                console.error('Ошибка при распознавании:', error);
+                resultContainer.innerHTML = `<p style="color: red;">❌ Ошибка: ${error.message}</p>`;
+            }
+        });
+
+        // --- Остальные скрипты  ---
+        document.getElementById('addPersonForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const name = document.getElementById('personName').value;
+            const photoFile = document.getElementById('personPhoto').files[0];
+            const formData = new FormData();
+            formData.append('name', name);
+            formData.append('photo', photoFile);
+            const addResult = document.getElementById('addResult');
+            addResult.style.display = 'block';
+            addResult.innerHTML = '<p>⏳ Загрузка...</p>';
+            try {
+                const response = await fetch(`${API_URL}/api/person/add`, { method: 'POST', body: formData });
+                const result = await response.json();
+                if (result.success) {
+                    addResult.innerHTML = `<p style="color: green;">✅ ${result.message}</p><p>ID: ${result.data.id}<br>Имя: ${result.data.name}<br>Найдено лиц: ${result.data.faces_found}</p>`;
+                    document.getElementById('addPersonForm').reset();
+                    loadPersons();
+                    loadStats();
+                } else {
+                    addResult.innerHTML = `<p style="color: red;">❌ Ошибка: ${result.message}</p>`;
+                }
+            } catch (error) {
+                addResult.innerHTML = `<p style="color: red;">❌ Ошибка сети: ${error.message}</p>`;
+            }
+        });
+
+        async function loadPersons() {
+            try {
+                const response = await fetch(`${API_URL}/api/person/list`);
+                const result = await response.json();
+                const container = document.getElementById('personsList');
+                container.innerHTML = '';
+                if (result.success && result.data && result.data.persons && result.data.persons.length > 0) {
+                    result.data.persons.forEach(person => {
+                        const item = document.createElement('div');
+                        item.className = 'person-item';
+                        item.innerHTML = `<div><strong>#${person.id}</strong> ${person.name} <small>(${person.added_date})</small></div><button class="btn-danger" onclick="deletePerson(${person.id}, '${person.name.replace(/'/g, "\\'")}')">Удалить</button>`;
+                        container.appendChild(item);
+                    });
+                } else {
+                    container.innerHTML = '<p style="text-align: center; color: #666;">База данных пуста</p>';
+                }
+            } catch (error) {
+                console.error('Ошибка при загрузке списка:', error);
+                document.getElementById('personsList').innerHTML = `<p style="color: red;">Ошибка при загрузке списка: ${error.message}</p>`;
+            }
+        }
+
+        async function deletePerson(id, name) {
+            if (!confirm(`Удалить ${name}?`)) return;
+            try {
+                const response = await fetch(`${API_URL}/api/person/${id}`, { method: 'DELETE' });
+                const result = await response.json();
+                if (result.success) {
+                    alert(result.message);
+                    loadPersons();
+                } else {
+                    alert('Ошибка: ' + result.message);
+                }
+            } catch (error) {
+                alert('Ошибка при удалении: ' + error.message);
+            }
+        }
+
+        async function loadStats() {
+            try {
+                const response = await fetch(`${API_URL}/api/stats`);
+                const result = await response.json();
+                const container = document.getElementById('statsContainer');
+                container.innerHTML = '';
+                if (result.success) {
+                    const stats = result.data;
+                    container.innerHTML += `<div class="stat-card"><h3>Людей в базе</h3><div class="value">${stats.total_persons}</div></div>`;
+                    container.innerHTML += `<div class="stat-card"><h3>Фотографий</h3><div class="value">${stats.total_photos}</div></div>`;
+                    if (stats.last_added) {
+                        container.innerHTML += `<div class="stat-card"><h3>Последнее добавление</h3><div class="value">${stats.last_added.name}</div><small>${stats.last_added.date}</small></div>`;
+                    }
+                }
+            } catch (error) {
+                alert('Ошибка при загрузке статистики: ' + error.message);
+            }
+        }
+            document.getElementById('testPostButton').addEventListener('click', async () => {
+                const resultContainer = document.getElementById('recognizeResult');
+                resultContainer.style.display = 'block';
+                resultContainer.innerHTML = '<p>⏳ Выполняю тестовый POST-запрос...</p>';
+                console.log('Отправка тестового POST-запроса...');
+
+                try {
+                    const response = await fetch(`${API_URL}/api/test-post`, {
+                        method: 'POST',
+                    });
+
+                    if (!response.ok) {
+                        throw new Error(`Сервер ответил с ошибкой: ${response.status}`);
+                    }
+
+                    const data = await response.json();
+                    console.log('Тестовый POST прошел успешно!', data);
+                    resultContainer.innerHTML = `<p style="color: green;">✅ Тестовый POST-запрос прошел успешно!</p>`;
+
+                } catch (error) {
+                    console.error('Тестовый POST-запрос провалился:', error);
+                    resultContainer.innerHTML = `<p style="color: red;">❌ Тестовый POST-запрос провалился: ${error.message}</p>`;
+                }
+            });
+
+        loadPersons();
+        loadStats();
+    </script>
+</body>
+</html>
