@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Debug Video with Gallery</title>
+    <style>
+        body { font-family: sans-serif; }
+        .key-frames {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+        .key-frame {
+            text-align: center;
+            font-size: 12px;
+        }
+        .key-frame img {
+            max-width: 100%;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Test Form with Key Frames Display</h1>
+
+    <form id="recognizeVideoForm">
+        <div>
+            <label for="recognizeVideo">Video file:</label>
+            <input type="file" id="recognizeVideo" required>
+        </div>
+        <br>
+        <div>
+            <label for="frameInterval">Interval:</label>
+            <input type="number" id="frameInterval" value="15">
+        </div>
+        <br>
+        <button type="submit">Submit for Processing</button>
+    </form>
+
+    <div id="result" style="margin-top: 20px; padding: 10px; border: 1px solid #ccc;">
+        Waiting for submission...
+    </div>
+
+    <script>
+        const API_URL = 'http://localhost:8000';
+
+        document.getElementById('recognizeVideoForm').addEventListener('submit', async (event) => {
+            event.preventDefault();
+
+            const resultDiv = document.getElementById('result');
+            resultDiv.innerHTML = 'Request sent, waiting for server response...';
+
+            const videoFile = document.getElementById('recognizeVideo').files[0];
+            const frameInterval = document.getElementById('frameInterval').value;
+
+            const formData = new FormData();
+            formData.append('video', videoFile);
+            formData.append('frame_interval', frameInterval);
+
+            try {
+                const response = await fetch(`${API_URL}/api/video/recognize`, {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const result = await response.json();
+
+                // --- NEW: Process response and build gallery ---
+                if (result.success && result.data) {
+                    const data = result.data;
+                    let html = `<h3>✅ Processing Results</h3>`;
+
+                    if (data.summary) {
+                        html += `<p>Duration: ${data.summary.duration_seconds.toFixed(1)} sec | Unique faces found: ${data.summary.unique_persons}</p>`;
+                    }
+
+                    if (data.key_frames && data.key_frames.length > 0) {
+                        html += `<h4>Key Frames:</h4><div class="key-frames">`;
+                        data.key_frames.forEach(frame => {
+                            html += `
+                                <div class="key-frame">
+                                    <img src="data:image/jpeg;base64,${frame.image_base64}" alt="Frame ${frame.frame_number}">
+                                    <span>Time: ${frame.timestamp}s</span>
+                                </div>
+                            `;
+                        });
+                        html += `</div>`;
+                    } else {
+                        html += `<p>No key frames found for display.</p>`;
+                    }
+                    resultDiv.innerHTML = html;
+                } else {
+                    resultDiv.innerHTML = 'An error occurred: <br><pre>' + JSON.stringify(result, null, 2) + '</pre>';
+                }
+
+            } catch (error) {
+                console.error('Critical error:', error);
+                resultDiv.innerHTML = 'An error occurred. Check console (F12).<br>' + error.message;
+            }
+        });
+    </script>
+
+</body>
+</html>

@@ -6,3 +6,5 @@ opencv-python==4.8.1.78
 numpy==1.24.3
 Pillow==10.1.0
 pydantic==2.4.2
+# Дополнительные библиотеки для работы с видео
+opencv-contrib-python==4.8.1.78

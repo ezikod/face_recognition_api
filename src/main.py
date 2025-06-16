@@ -86,8 +86,8 @@ async def log_requests(request: Request, call_next):
     return response
 
 # Глобальные переменные
-CSV_FILE = "persons_data.csv"
-UPLOAD_DIR = "uploads"
+CSV_FILE = "../persons_data.csv"
+UPLOAD_DIR = "../uploads"
 known_encodings = []
 known_names = []
 known_ids = []
@@ -195,6 +195,7 @@ async def root():
         "endpoints": {
             "POST /api/person/add": "Добавить человека",
             "POST /api/person/recognize": "Распознать лицо",
+            "POST /api/video/recognize": "Распознать лица на видео",
             "GET /api/person/list": "Список всех людей",
             "GET /api/person/{id}": "Получить информацию о человеке",
             "DELETE /api/person/{id}": "Удалить человека",
@@ -621,8 +622,209 @@ async def recognize_person_base64(image_base64: str = Form(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.post("/api/video/recognize",
+          response_model=ApiResponse,
+          tags=["Распознавание"],
+          summary="Распознать лица на видео")
+async def recognize_video(
+    video: UploadFile = File(..., description="Видеофайл для распознавания (MP4, AVI, MOV)"),
+    frame_interval: int = Form(15, description="Обрабатывать каждый N-й кадр (по умолчанию 15)")
+):
+    """
+    Распознает лица на видео, обрабатывая каждый N-й кадр.
+    Возвращает найденные лица с временными метками и ключевые кадры.
+    """
+    try:
+        # Сохраняем видеофайл
+        video_path = save_uploaded_file(video)
+        logger.info(f"Обработка видео: {video_path}")
+        
+        # Открываем видео
+        video_capture = cv2.VideoCapture(video_path)
+        
+        if not video_capture.isOpened():
+            os.remove(video_path)
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "success": False,
+                    "message": "Не удалось открыть видеофайл",
+                    "data": None
+                }
+            )
+        
+        # Получаем информацию о видео
+        fps = video_capture.get(cv2.CAP_PROP_FPS)
+        total_frames = int(video_capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        # Временное хранилище для уникальных НЕИЗВЕСТНЫХ лиц в этом видео
+        temp_unknown_encodings = [] 
+        person_appearances = {}
+        
+        # Результаты распознавания
+        recognition_results = []
+        key_frames = []
+        processed_frames = 0
+        frame_count = 0
+        
+        # Словарь для отслеживания уникальных появлений людей
+        person_appearances = {}
+        
+        logger.info(f"Видео: {total_frames} кадров, {fps} FPS, обработка каждого {frame_interval} кадра")
+        
+        while video_capture.isOpened():
+            ret, frame = video_capture.read()
+            
+            if not ret:
+                break
+            
+            # Обрабатываем каждый N-й кадр
+            if frame_count % frame_interval == 0:
+                # Конвертируем в RGB
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                
+                # Находим лица
+                face_locations = face_recognition.face_locations(rgb_frame)
+                
+                if face_locations:
+                    face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
+                    
+                    # Копируем кадр для рисования
+                    annotated_frame = frame.copy()
+                    frame_results = []
+                    
+                    for face_encoding, face_location in zip(face_encodings, face_locations):
+                        name = "Неизвестный"
+                        confidence = 0.0
+                        color = (0, 0, 255)  # Красный для неизвестных
+                        
+                        if known_encodings:
+                            matches = face_recognition.compare_faces(known_encodings, face_encoding)
+                            face_distances = face_recognition.face_distance(known_encodings, face_encoding)
+                            
+                            if True in matches:
+                                best_match_index = np.argmin(face_distances)
+                                if matches[best_match_index]:
+                                    name = known_names[best_match_index]
+                                    confidence = float(1 - face_distances[best_match_index])
+                                    color = (0, 255, 0)  # Зеленый для известных
+                        
+                        if name == "Неизвестный":
+                            if temp_unknown_encodings:
+                                unknown_distances = face_recognition.face_distance(temp_unknown_encodings, face_encoding)
+                                best_match_index = np.argmin(unknown_distances)
+                                # Если нашли похожее лицо (дистанция < 0.6), присваиваем ему тот же номер
+                                if unknown_distances[best_match_index] < 0.6:
+                                    name = f"Неизвестный #{best_match_index + 1}" 
+                                else:
+                                    # Иначе это новый неизвестный, добавляем его в список
+                                    temp_unknown_encodings.append(face_encoding)
+                                    name = f"Неизвестный #{len(temp_unknown_encodings)}"
+                            else:
+                                # Это самый первый неизвестный в видео
+                                temp_unknown_encodings.append(face_encoding)
+                                name = f"Неизвестный #1"
+                        
+                        # Рисуем рамку и имя
+                        top, right, bottom, left = face_location
+                        cv2.rectangle(annotated_frame, (left, top), (right, bottom), color, 2)
+                        cv2.rectangle(annotated_frame, (left, bottom - 35), (right, bottom), color, cv2.FILLED)
+                        cv2.putText(annotated_frame, name, (left + 6, bottom - 6), 
+                                  cv2.FONT_HERSHEY_DUPLEX, 0.6, (255, 255, 255), 1)
+                        
+                        # Сохраняем результат
+                        timestamp = frame_count / fps
+                        frame_results.append({
+                            "name": name,
+                            "confidence": round(confidence, 3),
+                            "timestamp": round(timestamp, 2),
+                            "frame_number": frame_count
+                        })
+                        
+                        # Отслеживаем уникальные появления
+                        if name not in person_appearances:
+                            person_appearances[name] = {
+                                "first_seen": timestamp,
+                                "last_seen": timestamp,
+                                "total_appearances": 0
+                            }
+                        person_appearances[name]["last_seen"] = timestamp
+                        person_appearances[name]["total_appearances"] += 1
+                    
+                    # Сохраняем ключевой кадр (каждый 5-й обработанный кадр с лицами)
+                    if processed_frames % 5 == 0 and len(key_frames) < 10:
+                        _, buffer = cv2.imencode('.jpg', annotated_frame)
+                        key_frame_base64 = base64.b64encode(buffer).decode('utf-8')
+                        key_frames.append({
+                            "frame_number": frame_count,
+                            "timestamp": round(frame_count / fps, 2),
+                            "faces_count": len(face_locations),
+                            "image_base64": key_frame_base64
+                        })
+                    
+                    recognition_results.extend(frame_results)
+                    processed_frames += 1
+                
+                # Логируем прогресс каждые 30 обработанных кадров
+                if processed_frames % 30 == 0:
+                    logger.info(f"Обработано {processed_frames} кадров из {frame_count // frame_interval}")
+            
+            frame_count += 1
+        
+        video_capture.release()
+        
+        # Удаляем временный видеофайл
+        os.remove(video_path)
+        logger.info(f"Обработка завершена. Найдено {len(person_appearances)} уникальных лиц")
+        
+        # Формируем итоговую статистику
+        summary = {
+            "total_frames": total_frames,
+            "processed_frames": frame_count // frame_interval if frame_interval > 0 else 0,
+            "fps": round(fps, 2),
+            "duration_seconds": round(total_frames / fps, 2) if fps > 0 else 0,
+            "unique_persons": len(person_appearances),
+            "person_appearances": {
+                name: {
+                    "first_seen": round(data["first_seen"], 2),
+                    "last_seen": round(data["last_seen"], 2),
+                    "total_appearances": data["total_appearances"]
+                }
+                for name, data in person_appearances.items()
+            }
+        }
+        
+        return {
+            "success": True,
+            "message": f"Видео обработано. Найдено {len(person_appearances)} уникальных лиц",
+            "data": {
+                "summary": summary,
+                "key_frames": key_frames,
+                "total_detections": len(recognition_results),
+                "detections": recognition_results[:100]  # Ограничиваем количество для ответа
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Ошибка при обработке видео: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "message": f"Ошибка сервера: {str(e)}",
+                "data": None
+            }
+        )
+
 # Запуск сервера
 if __name__ == "__main__":
     print("🚀 Запуск Face Recognition API...")
     
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(
+        "main:app",  # Путь к приложению в формате строки
+        host="0.0.0.0",
+        port=8000,
+        reload=False,
+        reload_dirs=["src"] # Список папок для отслеживания
+    )
