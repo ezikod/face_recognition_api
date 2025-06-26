@@ -10,6 +10,8 @@ import numpy as np
 from PIL import Image
 from datetime import datetime
 from typing import List, Optional
+import asyncio
+from enum import Enum
 
 from fastapi import FastAPI, File, UploadFile, Form, BackgroundTasks, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -17,13 +19,33 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import face_recognition
 
+from functools import wraps
+from typing import Callable
+import traceback
 
-# Настройка логирования
+
+
+# Logging setup
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Pydantic модели для валидации и документации ---
-# Эти модели будут отображаться в Swagger (/docs)
+# Processing states
+class ProcessingState(Enum):
+    IDLE = "idle"
+    PROCESSING_IMAGE = "processing_image"
+    PROCESSING_VIDEO = "processing_video"
+
+# Global state management
+class APIState:
+    def __init__(self):
+        self.current_state = ProcessingState.IDLE
+        self.lock = asyncio.Lock()
+        self.current_task_info = None
+
+api_state = APIState()
+
+# --- Pydantic models for validation and documentation ---
+# These models will be displayed in Swagger (/docs)
 
 class FaceLocation(BaseModel):
     top: int
@@ -34,21 +56,30 @@ class FaceLocation(BaseModel):
 class FaceData(BaseModel):
     name: str
     location: FaceLocation
-    encoding: List[float] = Field(..., description="Вектор признаков лица из 128 чисел.")
+    encoding: List[float] = Field(..., description="Face feature vector of 128 numbers.")
 
 class RecognitionResponseData(BaseModel):
     faces_count: int
     faces: List[FaceData]
-    processed_image_base64: str = Field(..., description="Изображение с нарисованными рамками в формате Base64.")
+    processed_image_base64: str = Field(..., description="Image with drawn bounding boxes in Base64 format.")
 
 class PersonInDB(BaseModel):
     id: int
     name: str
+    last_name: Optional[str] = None
+    workplace: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
     added_date: str
+    photo_path: str
 
 class AddPersonResponseData(BaseModel):
     id: int
     name: str
+    last_name: Optional[str] = None
+    workplace: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
     faces_found: int
 
 class StatsData(BaseModel):
@@ -61,23 +92,23 @@ class ApiResponse(BaseModel):
     data: Optional[dict] = None
 
 
-# Создаем приложение FastAPI
+# Create FastAPI application
 app = FastAPI(
     title="Face Recognition API",
-    description="API для распознавания лиц",
+    description="API for face recognition",
     version="1.0.0"
 )
 
-# Настройка CORS для работы с C# клиентом
+# CORS setup for C# client compatibility
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # В продакшене укажите конкретные домены
+    allow_origins=["*"],  # Specify specific domains in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Middleware для логирования запросов
+# Middleware for request logging
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     logger.info(f"Request: {request.method} {request.url.path}")
@@ -85,20 +116,24 @@ async def log_requests(request: Request, call_next):
     logger.info(f"Response status: {response.status_code}")
     return response
 
-# Глобальные переменные
+# Global variables
 CSV_FILE = "../persons_data.csv"
 UPLOAD_DIR = "../uploads"
 known_encodings = []
 known_names = []
 known_ids = []
 
-# Создаем необходимые директории
+# Create necessary directories
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# Модели данных
+# Data models
 class PersonResponse(BaseModel):
     id: int
     name: str
+    last_name: Optional[str] = None
+    workplace: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
     added_date: str
     photo_path: str
 
@@ -108,21 +143,16 @@ class RecognitionResult(BaseModel):
     confidence: float
     location: dict
 
-class ApiResponse(BaseModel):
-    success: bool
-    message: str
-    data: Optional[dict] = None
-
-# Инициализация
+# Initialization
 def init_csv():
-    """Инициализация CSV файла"""
+    """Initialize CSV file with extended fields"""
     if not os.path.exists(CSV_FILE):
         with open(CSV_FILE, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
-            writer.writerow(['ID', 'Имя', 'Дата добавления', 'Путь к фото', 'Кодировка лица'])
+            writer.writerow(['ID', 'Name', 'Last Name', 'Workplace', 'Email', 'Phone', 'Date Added', 'Photo Path', 'Face Encoding'])
 
 def load_data():
-    """Загрузка данных из CSV"""
+    """Load data from CSV"""
     global known_encodings, known_names, known_ids
     known_encodings = []
     known_names = []
@@ -132,28 +162,28 @@ def load_data():
         if os.path.exists(CSV_FILE):
             with open(CSV_FILE, 'r', encoding='utf-8') as f:
                 reader = csv.reader(f)
-                next(reader)  # Пропускаем заголовок
+                next(reader)  # Skip header
                 
                 for row in reader:
-                    if len(row) >= 5:
+                    if len(row) >= 9:  # Updated to include all fields
                         person_id = int(row[0])
                         name = row[1]
-                        encoding_str = row[4]
+                        encoding_str = row[8]  # Face encoding is now at index 8
                         
                         if encoding_str:
                             encoding = np.array(json.loads(encoding_str))
                             known_encodings.append(encoding)
                             known_names.append(name)
                             known_ids.append(person_id)
-            logger.info(f"Загружено {len(known_names)} записей из базы данных")
+            logger.info(f"Loaded {len(known_names)} records from database")
         else:
-            logger.info("База данных пуста, создан новый файл")
+            logger.info("Database is empty, created new file")
     except Exception as e:
-        logger.error(f"Ошибка при загрузке данных: {e}")
+        logger.error(f"Error loading data: {e}")
 
-# Вспомогательные функции
+# Helper functions
 def save_uploaded_file(upload_file: UploadFile) -> str:
-    """Сохранение загруженного файла"""
+    """Save uploaded file"""
     try:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{timestamp}_{upload_file.filename}"
@@ -163,234 +193,341 @@ def save_uploaded_file(upload_file: UploadFile) -> str:
         with open(file_path, "wb") as f:
             f.write(content)
         
-        logger.info(f"Файл сохранен: {file_path}")
+        logger.info(f"File saved: {file_path}")
         return file_path
     except Exception as e:
-        logger.error(f"Ошибка при сохранении файла: {e}")
+        logger.error(f"Error saving file: {e}")
         raise
 
 def image_to_base64(image_path: str) -> str:
-    """Конвертация изображения в base64"""
+    """Convert image to base64"""
     with open(image_path, "rb") as f:
         return base64.b64encode(f.read()).decode()
 
 def base64_to_image(base64_string: str) -> np.ndarray:
-    """Конвертация base64 в изображение"""
+    """Convert base64 to image"""
     img_data = base64.b64decode(base64_string)
     img = Image.open(io.BytesIO(img_data))
     return np.array(img)
 
-# Загружаем данные при старте
+# Обновленный декоратор для проверки состояния
+def check_api_state(state_type: ProcessingState):
+    """Декоратор для проверки и управления состоянием API"""
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            # Проверка текущего состояния
+            if api_state.current_state != ProcessingState.IDLE:
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "success": False,
+                        "message": f"System is busy: {api_state.current_state.value}. Please wait and try again.",
+                        "data": {
+                            "current_state": api_state.current_state.value,
+                            "current_task": api_state.current_task_info,
+                            "retry_after": 5  # Секунды до повторной попытки
+                        }
+                    }
+                )
+            
+            # Захват блокировки и установка состояния
+            async with api_state.lock:
+                api_state.current_state = state_type
+                api_state.current_task_info = {
+                    "type": func.__name__,
+                    "started_at": datetime.now().isoformat(),
+                    "endpoint": func.__name__
+                }
+                
+                try:
+                    # Выполнение функции
+                    result = await func(*args, **kwargs)
+                    return result
+                    
+                except Exception as e:
+                    # Логирование ошибки
+                    logger.error(f"Error in {func.__name__}: {str(e)}")
+                    logger.error(traceback.format_exc())
+                    
+                    # Возврат ошибки
+                    return JSONResponse(
+                        status_code=500,
+                        content={
+                            "success": False,
+                            "message": f"Internal server error: {str(e)}",
+                            "data": None
+                        }
+                    )
+                finally:
+                    # Всегда сбрасываем состояние
+                    api_state.current_state = ProcessingState.IDLE
+                    api_state.current_task_info = None
+        
+        return wrapper
+    return decorator
+
+# Load data on startup
 init_csv()
 load_data()
 
 # API Endpoints
 @app.get("/")
 async def root():
-    """Проверка работоспособности API"""
+    """Check API health"""
     return {
         "status": "active",
         "service": "Face Recognition API",
         "version": "1.0.0",
+        "current_state": api_state.current_state.value,
         "endpoints": {
-            "POST /api/person/add": "Добавить человека",
-            "POST /api/person/recognize": "Распознать лицо",
-            "POST /api/video/recognize": "Распознать лица на видео",
-            "GET /api/person/list": "Список всех людей",
-            "GET /api/person/{id}": "Получить информацию о человеке",
-            "DELETE /api/person/{id}": "Удалить человека",
-            "GET /api/stats": "Статистика системы"
+            "POST /api/person/add": "Add person",
+            "POST /api/person/recognize": "Recognize face",
+            "POST /api/video/recognize": "Recognize faces in video",
+            "GET /api/person/list": "List all people",
+            "GET /api/person/{id}": "Get person info",
+            "DELETE /api/person/{id}": "Delete person",
+            "GET /api/stats": "System statistics",
+            "GET /api/status": "Get processing status"
         }
     }
 
+@app.get("/api/status",
+         response_model=ApiResponse,
+         tags=["System"],
+         summary="Get current processing status")
+async def get_status():
+    """Get current API processing status"""
+    return {
+        "success": True,
+        "message": "Status retrieved",
+        "data": {
+            "state": api_state.current_state.value,
+            "is_busy": api_state.current_state != ProcessingState.IDLE,
+            "current_task": api_state.current_task_info
+        }
+    }
+    
+
 @app.post("/api/person/add",
           response_model=ApiResponse,
-          tags=["Управление базой"],
-          summary="Добавить нового человека в базу")
+          tags=["Database Management"],
+          summary="Add new person to database with extended profile")
+@check_api_state(ProcessingState.PROCESSING_IMAGE)
 async def add_person(
-    name: str = Form(..., description="Имя добавляемого человека."),
-    photo: UploadFile = File(..., description="Фотография человека (лицо должно быть хорошо видно).")
+    name: str = Form(..., description="Name of the person to add."),
+    photo: UploadFile = File(..., description="Photo of the person (face should be clearly visible)."),
+    last_name: Optional[str] = Form(None, description="Last name (optional)"),
+    workplace: Optional[str] = Form(None, description="Workplace (optional)"),
+    email: Optional[str] = Form(None, description="Email address (optional)"),
+    phone: Optional[str] = Form(None, description="Phone number (optional)")
 ):
     """
-    Добавить нового человека в базу данных
+    Add new person to database with extended profile information
     
     Parameters:
-    - name: Имя человека
-    - photo: Фотография (JPG, PNG)
+    - name: Person's name (required)
+    - photo: Photo file (JPG, PNG) (required)
+    - last_name: Last name (optional)
+    - workplace: Place of work (optional)
+    - email: Email address (optional)
+    - phone: Phone number (optional)
     """
-    try:
-        # Сохраняем файл
-        file_path = save_uploaded_file(photo)
-        
-        # Загружаем изображение для обработки
-        image = face_recognition.load_image_file(file_path)
-        face_locations = face_recognition.face_locations(image)
-        
-        if len(face_locations) == 0:
-            os.remove(file_path)  # Удаляем файл если лицо не найдено
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "success": False,
-                    "message": "На фото не найдено лиц",
-                    "data": None
-                }
-            )
-        
-        if len(face_locations) > 1:
-            # Предупреждение, но продолжаем с первым лицом
-            print(f"Внимание: найдено {len(face_locations)} лиц, используется первое")
-        
-        # Получаем кодировку лица
-        face_encoding = face_recognition.face_encodings(image, face_locations)[0]
-        
-        # Генерируем ID
-        person_id = len(known_ids) + 1
-        
-        # Добавляем в память
-        known_encodings.append(face_encoding)
-        known_names.append(name)
-        known_ids.append(person_id)
-        
-        # Сохраняем в CSV
-        with open(CSV_FILE, 'a', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            encoding_str = json.dumps(face_encoding.tolist())
-            writer.writerow([
-                person_id,
-                name,
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                file_path,
-                encoding_str
-            ])
-        
-        logger.info(f"Добавлен новый человек: {name} (ID: {person_id})")
-        
-        return {
-            "success": True,
-            "message": f"Человек '{name}' успешно добавлен",
-            "data": {
-                "id": person_id,
-                "name": name,
-                "faces_found": len(face_locations),
-                "photo_path": file_path
-            }
-        }
-        
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={
-                "success": False,
-                "message": f"Ошибка сервера: {str(e)}",
-                "data": None
-            }
+    # Сохраняем файл
+    file_path = save_uploaded_file(photo)
+    
+    # Загружаем изображение для обработки
+    image = face_recognition.load_image_file(file_path)
+    face_locations = face_recognition.face_locations(image)
+    
+    if len(face_locations) == 0:
+        os.remove(file_path)  # Удаляем файл если лицо не найдено
+        raise HTTPException(
+            status_code=400,
+            detail="No faces found in the photo"
         )
+    
+    if len(face_locations) > 1:
+        logger.warning(f"Warning: found {len(face_locations)} faces, using the first one")
+    
+    # Получаем кодировку лица
+    face_encoding = face_recognition.face_encodings(image, face_locations)[0]
+    
+    # Генерируем ID
+    next_id = max(known_ids) + 1 if known_ids else 1
+    
+    # Добавляем в память
+    known_encodings.append(face_encoding)
+    known_names.append(name)
+    known_ids.append(next_id)
+    
+    # Сохраняем в CSV с расширенными полями
+    with open(CSV_FILE, 'a', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        encoding_str = json.dumps(face_encoding.tolist())
+        writer.writerow([
+            next_id,
+            name,
+            last_name or "",
+            workplace or "",
+            email or "",
+            phone or "",
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            file_path,
+            encoding_str
+        ])
+    
+    # Формируем полное имя для логирования
+    full_name = f"{name} {last_name}" if last_name else name
+    logger.info(f"Added new person: {full_name} (ID: {next_id})")
+    
+    return {
+        "success": True,
+        "message": f"Person '{full_name}' successfully added",
+        "data": {
+            "id": next_id,
+            "name": name,
+            "last_name": last_name,
+            "workplace": workplace,
+            "email": email,
+            "phone": phone,
+            "faces_found": len(face_locations),
+            "photo_path": file_path
+        }
+    }
  
 @app.post("/api/person/recognize",
           response_model=ApiResponse,
-          tags=["Распознавание"],
-          summary="Распознать лица на фотографии")
-async def recognize_person(photo: UploadFile = File(..., description="Фотография для распознавания.")):
+          tags=["Recognition"],
+          summary="Recognize faces in photo")
+async def recognize_person(photo: UploadFile = File(..., description="Photo for recognition.")):
     """
-    Распознает лица, рисует на фото рамки и имена,
-    и возвращает обработанное изображение и вектор признаков лица в формате Base64.
+    Recognizes faces, draws bounding boxes and names on the photo,
+    and returns processed image and face feature vectors in Base64 format.
     """
-    try:
-        # Читаем загруженный файл в память как массив байт
-        image_bytes = await photo.read()
-        
-        # Конвертируем байты в массив NumPy, а затем в формат OpenCV (BGR)
-        np_array = np.frombuffer(image_bytes, np.uint8)
-        image_bgr = cv2.imdecode(np_array, cv2.IMREAD_COLOR)
-        
-        # Для face_recognition нужен формат RGB, поэтому конвертируем
-        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-
-        # Находим все лица и их кодировки
-        face_locations = face_recognition.face_locations(image_rgb)
-        face_encodings = face_recognition.face_encodings(image_rgb, face_locations)
-        logger.info(f"Найдено {len(face_locations)} лиц на изображении.")
-
-        recognition_results = []
-        
-        # Проходим по каждому найденному лицу
-        for i, (top, right, bottom, left) in enumerate(face_locations):
-            face_encoding = face_encodings[i]
-            
-            name = "Неизвестный"
-            color = (0, 0, 255) # Красный цвет для рамки неизвестного
-            
-            if known_encodings:
-                matches = face_recognition.compare_faces(known_encodings, face_encoding)
-                face_distances = face_recognition.face_distance(known_encodings, face_encoding)
-                
-                if True in matches:
-                    best_match_index = np.argmin(face_distances)
-                    if matches[best_match_index]:
-                        name = known_names[best_match_index]
-                        color = (0, 255, 0) # Зеленый цвет для рамки известного
-
-            # --- Рисование на изображении (в формате BGR) ---
-            cv2.rectangle(image_bgr, (left, top), (right, bottom), color, 2)
-            cv2.rectangle(image_bgr, (left, bottom - 35), (right, bottom), color, cv2.FILLED)
-            font = cv2.FONT_HERSHEY_DUPLEX
-            cv2.putText(image_bgr, name, (left + 6, bottom - 6), font, 1.0, (255, 255, 255), 1)
-
-            # Собираем результат для этого лица
-            recognition_results.append({
-                "name": name, 
-                "location": {"top": top, "right": right, "bottom": bottom, "left": left},
-                "encoding": face_encoding.tolist()  # Добавляем вектор в ответ
-            })
-
-        # --- Кодирование обработанного изображения в Base64 ---
-        _, buffer = cv2.imencode('.jpg', image_bgr)
-        processed_image_base64 = base64.b64encode(buffer).decode('utf-8')
-
-        return {
-            "success": True,
-            "message": f"Распознавание завершено.",
-            "data": {
-                "faces_count": len(recognition_results),
-                "faces": recognition_results,
-                "processed_image_base64": processed_image_base64
-            }
-        }
-
-    except Exception as e:
-        logger.error(f"Критическая ошибка в /api/person/recognize: {e}", exc_info=True)
+    # Check if system is busy
+    if api_state.current_state != ProcessingState.IDLE:
         return JSONResponse(
-            status_code=500,
-            content={"success": False, "message": f"Внутренняя ошибка сервера: {str(e)}"}
+            status_code=503,
+            content={
+                "success": False,
+                "message": f"System is busy: {api_state.current_state.value}. Please wait and try again.",
+                "data": {
+                    "current_state": api_state.current_state.value,
+                    "current_task": api_state.current_task_info
+                }
+            }
         )
+    
+    async with api_state.lock:
+        # Set processing state
+        api_state.current_state = ProcessingState.PROCESSING_IMAGE
+        api_state.current_task_info = {"type": "image_recognition", "started_at": datetime.now().isoformat()}
+        
+        try:
+            # Read uploaded file into memory as byte array
+            image_bytes = await photo.read()
+            
+            # Convert bytes to NumPy array, then to OpenCV format (BGR)
+            np_array = np.frombuffer(image_bytes, np.uint8)
+            image_bgr = cv2.imdecode(np_array, cv2.IMREAD_COLOR)
+            
+            # face_recognition needs RGB format, so convert
+            image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+
+            # Find all faces and their encodings
+            face_locations = face_recognition.face_locations(image_rgb)
+            face_encodings = face_recognition.face_encodings(image_rgb, face_locations)
+            logger.info(f"Found {len(face_locations)} faces in the image.")
+
+            recognition_results = []
+            
+            # Process each found face
+            for i, (top, right, bottom, left) in enumerate(face_locations):
+                face_encoding = face_encodings[i]
+                
+                name = "Unknown"
+                color = (0, 0, 255) # Red color for unknown face bounding box
+                
+                if known_encodings:
+                    matches = face_recognition.compare_faces(known_encodings, face_encoding)
+                    face_distances = face_recognition.face_distance(known_encodings, face_encoding)
+                    
+                    if True in matches:
+                        best_match_index = np.argmin(face_distances)
+                        if matches[best_match_index]:
+                            name = known_names[best_match_index]
+                            color = (0, 255, 0) # Green color for known face bounding box
+
+                # --- Draw on image (in BGR format) ---
+                cv2.rectangle(image_bgr, (left, top), (right, bottom), color, 2)
+                cv2.rectangle(image_bgr, (left, bottom - 35), (right, bottom), color, cv2.FILLED)
+                font = cv2.FONT_HERSHEY_DUPLEX
+                cv2.putText(image_bgr, name, (left + 6, bottom - 6), font, 1.0, (255, 255, 255), 1)
+
+                # Collect result for this face
+                recognition_results.append({
+                    "name": name, 
+                    "location": {"top": top, "right": right, "bottom": bottom, "left": left},
+                    "encoding": face_encoding.tolist()  # Add vector to response
+                })
+
+            # --- Encode processed image to Base64 ---
+            _, buffer = cv2.imencode('.jpg', image_bgr)
+            processed_image_base64 = base64.b64encode(buffer).decode('utf-8')
+
+            return {
+                "success": True,
+                "message": f"Recognition completed.",
+                "data": {
+                    "faces_count": len(recognition_results),
+                    "faces": recognition_results,
+                    "processed_image_base64": processed_image_base64
+                }
+            }
+
+        except Exception as e:
+            logger.error(f"Critical error in /api/person/recognize: {e}", exc_info=True)
+            return JSONResponse(
+                status_code=500,
+                content={"success": False, "message": f"Internal server error: {str(e)}"}
+            )
+        finally:
+            # Reset state
+            api_state.current_state = ProcessingState.IDLE
+            api_state.current_task_info = None
 
 @app.get("/api/person/list",
          response_model=ApiResponse,
-         tags=["Управление базой"],
-         summary="Получить список всех людей в базе")
+         tags=["Database Management"],
+         summary="Get list of all people in database")
 async def list_persons():
-    """Получить список всех людей в базе данных"""
+    """Get list of all people in database with extended information"""
     try:
         persons = []
         
         if os.path.exists(CSV_FILE):
             with open(CSV_FILE, 'r', encoding='utf-8') as f:
                 reader = csv.reader(f)
-                next(reader)  # Пропускаем заголовок
+                next(reader)  # Skip header
                 
                 for row in reader:
-                    if len(row) >= 4:
-                        persons.append({
+                    if len(row) >= 8:  # Updated to handle extended fields
+                        person_data = {
                             "id": int(row[0]),
                             "name": row[1],
-                            "added_date": row[2],
-                            "photo_path": row[3]
-                        })
+                            "last_name": row[2] if row[2] else None,
+                            "workplace": row[3] if row[3] else None,
+                            "email": row[4] if row[4] else None,
+                            "phone": row[5] if row[5] else None,
+                            "added_date": row[6],
+                            "photo_path": row[7]
+                        }
+                        persons.append(person_data)
         
         return {
             "success": True,
-            "message": f"Найдено {len(persons)} человек",
+            "message": f"Found {len(persons)} people",
             "data": {
                 "count": len(persons),
                 "persons": persons
@@ -398,42 +535,46 @@ async def list_persons():
         }
         
     except Exception as e:
-        logger.error(f"Ошибка при получении списка: {e}")
+        logger.error(f"Error getting list: {e}")
         return JSONResponse(
             status_code=500,
             content={
                 "success": False,
-                "message": f"Ошибка сервера: {str(e)}",
+                "message": f"Server error: {str(e)}",
                 "data": None
             }
         )
 
 @app.get("/api/person/{person_id}",
          response_model=ApiResponse,
-         tags=["Управление базой"],
-         summary="Получить информацию о конкретном человеке")
+         tags=["Database Management"],
+         summary="Get specific person info")
 async def get_person(person_id: int):
-    """Получить информацию о конкретном человеке"""
+    """Get specific person information with all extended fields"""
     try:
         with open(CSV_FILE, 'r', encoding='utf-8') as f:
             reader = csv.reader(f)
             next(reader)
             
             for row in reader:
-                if len(row) >= 4 and int(row[0]) == person_id:
+                if len(row) >= 8 and int(row[0]) == person_id:
                     return JSONResponse(content={
                         "success": True,
-                        "message": "Человек найден",
+                        "message": "Person found",
                         "data": {
                             "id": int(row[0]),
                             "name": row[1],
-                            "added_date": row[2],
-                            "photo_path": row[3],
-                            "photo_base64": image_to_base64(row[3]) if os.path.exists(row[3]) else None
+                            "last_name": row[2] if row[2] else None,
+                            "workplace": row[3] if row[3] else None,
+                            "email": row[4] if row[4] else None,
+                            "phone": row[5] if row[5] else None,
+                            "added_date": row[6],
+                            "photo_path": row[7],
+                            "photo_base64": image_to_base64(row[7]) if os.path.exists(row[7]) else None
                         }
                     })
         
-        raise HTTPException(status_code=404, detail="Человек не найден")
+        raise HTTPException(status_code=404, detail="Person not found")
         
     except HTTPException:
         raise
@@ -442,10 +583,10 @@ async def get_person(person_id: int):
 
 @app.delete("/api/person/{person_id}",
             response_model=ApiResponse,
-            tags=["Управление базой"],
-            summary="Удалить человека из базы данных")
+            tags=["Database Management"],
+            summary="Delete person from database")
 async def delete_person(person_id: int):
-    """Удалить человека из базы данных"""
+    """Delete person from database"""
     try:
         rows = []
         deleted = False
@@ -453,39 +594,41 @@ async def delete_person(person_id: int):
         
         with open(CSV_FILE, 'r', encoding='utf-8') as f:
             reader = csv.reader(f)
-            rows.append(next(reader))  # Заголовок
+            rows.append(next(reader))  # Header
             
             for row in reader:
-                if len(row) >= 5 and int(row[0]) != person_id:
+                if len(row) >= 8 and int(row[0]) != person_id:
                     rows.append(row)
                 elif int(row[0]) == person_id:
                     deleted = True
                     deleted_name = row[1]
-                    # Удаляем файл фото если существует
-                    if os.path.exists(row[3]):
-                        os.remove(row[3])
+                    if row[2]:  # Add last name if exists
+                        deleted_name += f" {row[2]}"
+                    # Delete photo file if exists
+                    if os.path.exists(row[7]):
+                        os.remove(row[7])
         
         if not deleted:
             return JSONResponse(
                 status_code=404,
                 content={
                     "success": False,
-                    "message": "Человек не найден",
+                    "message": "Person not found",
                     "data": None
                 }
             )
         
-        # Перезаписываем файл
+        # Rewrite file
         with open(CSV_FILE, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             writer.writerows(rows)
         
-        # Перезагружаем данные
+        # Reload data
         load_data()
         
         return {
             "success": True,
-            "message": f"Человек '{deleted_name}' удален",
+            "message": f"Person '{deleted_name}' deleted",
             "data": {
                 "id": person_id,
                 "name": deleted_name
@@ -497,182 +640,198 @@ async def delete_person(person_id: int):
             status_code=500,
             content={
                 "success": False,
-                "message": f"Ошибка сервера: {str(e)}",
+                "message": f"Server error: {str(e)}",
                 "data": None
             }
         )
 
 @app.get("/api/stats",
          response_model=ApiResponse,
-         tags=["Статистика"],
-         summary="Получить статистику по базе данных")
+         tags=["Statistics"],
+         summary="Get database statistics")
 async def get_stats():
-    """Получить статистику системы"""
+    """Get system statistics"""
     try:
         total_persons = len(known_names)
         
-        # Последнее добавление
+        # Last addition with full name
         last_added = None
         if os.path.exists(CSV_FILE):
             with open(CSV_FILE, 'r', encoding='utf-8') as f:
                 reader = list(csv.reader(f))
                 if len(reader) > 1:
                     last_row = reader[-1]
-                    if len(last_row) >= 3:
+                    if len(last_row) >= 7:
+                        full_name = last_row[1]
+                        if last_row[2]:  # Add last name if exists
+                            full_name += f" {last_row[2]}"
                         last_added = {
-                            "name": last_row[1],
-                            "date": last_row[2]
+                            "name": full_name,
+                            "date": last_row[6]
                         }
         
         return {
             "success": True,
-            "message": "Статистика получена",
+            "message": "Statistics retrieved",
             "data": {
                 "total_persons": total_persons,
                 "total_photos": total_persons,
                 "last_added": last_added,
-                "storage_path": UPLOAD_DIR
+                "storage_path": UPLOAD_DIR,
+                "api_state": api_state.current_state.value
             }
         }
         
     except Exception as e:
-        logger.error(f"Ошибка при получении статистики: {e}")
+        logger.error(f"Error getting statistics: {e}")
         return JSONResponse(
             status_code=500,
             content={
                 "success": False,
-                "message": f"Ошибка сервера: {str(e)}",
+                "message": f"Server error: {str(e)}",
                 "data": None
             }
         )
 
 @app.post("/api/person/recognize-base64",
           response_model=ApiResponse,
-          tags=["Распознавание"],
-          summary="Распознать лица на изображении в формате base64")
+          tags=["Recognition"],
+          summary="Recognize faces in base64 image")
 async def recognize_person_base64(image_base64: str = Form(...)):
     """
-    Распознать лица на изображении в формате base64
+    Recognize faces in base64 image
     
     Parameters:
-    - image_base64: Изображение в формате base64
+    - image_base64: Image in base64 format
     """
-    try:
-        # Конвертируем base64 в изображение
-        image = base64_to_image(image_base64)
+    # Check if system is busy
+    if api_state.current_state != ProcessingState.IDLE:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "success": False,
+                "message": f"System is busy: {api_state.current_state.value}. Please wait and try again.",
+                "data": {
+                    "current_state": api_state.current_state.value,
+                    "current_task": api_state.current_task_info
+                }
+            }
+        )
+    
+    async with api_state.lock:
+        api_state.current_state = ProcessingState.PROCESSING_IMAGE
+        api_state.current_task_info = {"type": "base64_recognition", "started_at": datetime.now().isoformat()}
         
-        # Находим лица
-        face_locations = face_recognition.face_locations(image)
-        
-        if len(face_locations) == 0:
+        try:
+            # Convert base64 to image
+            image = base64_to_image(image_base64)
+            
+            # Find faces
+            face_locations = face_recognition.face_locations(image)
+            
+            if len(face_locations) == 0:
+                return JSONResponse(content={
+                    "success": True,
+                    "message": "No faces found in photo",
+                    "data": {
+                        "faces_count": 0,
+                        "faces": []
+                    }
+                })
+            
+            # Get encodings
+            face_encodings = face_recognition.face_encodings(image, face_locations)
+            
+            results = []
+            
+            for i, (face_encoding, face_location) in enumerate(zip(face_encodings, face_locations)):
+                person_id = 0
+                name = "Unknown"
+                confidence = 0.0
+                
+                if len(known_encodings) > 0:
+                    matches = face_recognition.compare_faces(known_encodings, face_encoding)
+                    face_distances = face_recognition.face_distance(known_encodings, face_encoding)
+                    
+                    if True in matches:
+                        best_match_index = np.argmin(face_distances)
+                        if matches[best_match_index]:
+                            person_id = known_ids[best_match_index]
+                            name = known_names[best_match_index]
+                            confidence = float(1 - face_distances[best_match_index])
+                
+                top, right, bottom, left = face_location
+                
+                results.append({
+                    "face_id": i + 1,
+                    "person_id": person_id,
+                    "name": name,
+                    "confidence": round(confidence, 3),
+                    "location": {
+                        "top": top,
+                        "right": right,
+                        "bottom": bottom,
+                        "left": left
+                    }
+                })
+            
             return JSONResponse(content={
                 "success": True,
-                "message": "На фото не найдено лиц",
+                "message": f"Found {len(results)} faces",
                 "data": {
-                    "faces_count": 0,
-                    "faces": []
+                    "faces_count": len(results),
+                    "faces": results
                 }
             })
-        
-        # Получаем кодировки
-        face_encodings = face_recognition.face_encodings(image, face_locations)
-        
-        results = []
-        
-        for i, (face_encoding, face_location) in enumerate(zip(face_encodings, face_locations)):
-            person_id = 0
-            name = "Неизвестный"
-            confidence = 0.0
             
-            if len(known_encodings) > 0:
-                matches = face_recognition.compare_faces(known_encodings, face_encoding)
-                face_distances = face_recognition.face_distance(known_encodings, face_encoding)
-                
-                if True in matches:
-                    best_match_index = np.argmin(face_distances)
-                    if matches[best_match_index]:
-                        person_id = known_ids[best_match_index]
-                        name = known_names[best_match_index]
-                        confidence = float(1 - face_distances[best_match_index])
-            
-            top, right, bottom, left = face_location
-            
-            results.append({
-                "face_id": i + 1,
-                "person_id": person_id,
-                "name": name,
-                "confidence": round(confidence, 3),
-                "location": {
-                    "top": top,
-                    "right": right,
-                    "bottom": bottom,
-                    "left": left
-                }
-            })
-        
-        return JSONResponse(content={
-            "success": True,
-            "message": f"Найдено {len(results)} лиц",
-            "data": {
-                "faces_count": len(results),
-                "faces": results
-            }
-        })
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+        finally:
+            api_state.current_state = ProcessingState.IDLE
+            api_state.current_task_info = None
 
 
 @app.post("/api/video/recognize",
           response_model=ApiResponse,
-          tags=["Распознавание"],
-          summary="Распознать лица на видео")
+          tags=["Recognition"],
+          summary="Recognize faces in video")
+@check_api_state(ProcessingState.PROCESSING_VIDEO)
 async def recognize_video(
-    video: UploadFile = File(..., description="Видеофайл для распознавания (MP4, AVI, MOV)"),
-    frame_interval: int = Form(15, description="Обрабатывать каждый N-й кадр (по умолчанию 15)")
+    video: UploadFile = File(..., description="Video file for recognition (MP4, AVI, MOV)"),
+    frame_interval: int = Form(15, description="Process every Nth frame (default 15)")
 ):
-    """
-    Распознает лица на видео, обрабатывая каждый N-й кадр.
-    Возвращает найденные лица с временными метками и ключевые кадры.
-    """
+    """Recognizes faces in video with proper state management"""
+    # Сохраняем видео файл
+    video_path = save_uploaded_file(video)
+    logger.info(f"Processing video: {video_path}")
+    
+    # Открываем видео
+    video_capture = cv2.VideoCapture(video_path)
+    
+    if not video_capture.isOpened():
+        os.remove(video_path)
+        raise HTTPException(
+            status_code=400,
+            detail="Failed to open video file"
+        )
+    
+    # Получаем информацию о видео
+    fps = video_capture.get(cv2.CAP_PROP_FPS)
+    total_frames = int(video_capture.get(cv2.CAP_PROP_FRAME_COUNT))
+    
+    # Временное хранилище для неизвестных лиц
+    temp_unknown_encodings = []
+    person_appearances = {}
+    
+    # Результаты распознавания
+    recognition_results = []
+    key_frames = []
+    processed_frames = 0
+    frame_count = 0
+    
+    logger.info(f"Video: {total_frames} frames, {fps} FPS, processing every {frame_interval} frame")
+    
     try:
-        # Сохраняем видеофайл
-        video_path = save_uploaded_file(video)
-        logger.info(f"Обработка видео: {video_path}")
-        
-        # Открываем видео
-        video_capture = cv2.VideoCapture(video_path)
-        
-        if not video_capture.isOpened():
-            os.remove(video_path)
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "success": False,
-                    "message": "Не удалось открыть видеофайл",
-                    "data": None
-                }
-            )
-        
-        # Получаем информацию о видео
-        fps = video_capture.get(cv2.CAP_PROP_FPS)
-        total_frames = int(video_capture.get(cv2.CAP_PROP_FRAME_COUNT))
-        
-        # Временное хранилище для уникальных НЕИЗВЕСТНЫХ лиц в этом видео
-        temp_unknown_encodings = [] 
-        person_appearances = {}
-        
-        # Результаты распознавания
-        recognition_results = []
-        key_frames = []
-        processed_frames = 0
-        frame_count = 0
-        
-        # Словарь для отслеживания уникальных появлений людей
-        person_appearances = {}
-        
-        logger.info(f"Видео: {total_frames} кадров, {fps} FPS, обработка каждого {frame_interval} кадра")
-        
         while video_capture.isOpened():
             ret, frame = video_capture.read()
             
@@ -695,9 +854,9 @@ async def recognize_video(
                     frame_results = []
                     
                     for face_encoding, face_location in zip(face_encodings, face_locations):
-                        name = "Неизвестный"
+                        name = "Unknown"
                         confidence = 0.0
-                        color = (0, 0, 255)  # Красный для неизвестных
+                        color = (0, 0, 255)  # Красный для неизвестного
                         
                         if known_encodings:
                             matches = face_recognition.compare_faces(known_encodings, face_encoding)
@@ -708,29 +867,27 @@ async def recognize_video(
                                 if matches[best_match_index]:
                                     name = known_names[best_match_index]
                                     confidence = float(1 - face_distances[best_match_index])
-                                    color = (0, 255, 0)  # Зеленый для известных
+                                    color = (0, 255, 0)  # Зеленый для известного
                         
-                        if name == "Неизвестный":
+                        if name == "Unknown":
+                            # Проверяем среди временных неизвестных
                             if temp_unknown_encodings:
                                 unknown_distances = face_recognition.face_distance(temp_unknown_encodings, face_encoding)
                                 best_match_index = np.argmin(unknown_distances)
-                                # Если нашли похожее лицо (дистанция < 0.6), присваиваем ему тот же номер
                                 if unknown_distances[best_match_index] < 0.6:
-                                    name = f"Неизвестный #{best_match_index + 1}" 
+                                    name = f"Unknown #{best_match_index + 1}"
                                 else:
-                                    # Иначе это новый неизвестный, добавляем его в список
                                     temp_unknown_encodings.append(face_encoding)
-                                    name = f"Неизвестный #{len(temp_unknown_encodings)}"
+                                    name = f"Unknown #{len(temp_unknown_encodings)}"
                             else:
-                                # Это самый первый неизвестный в видео
                                 temp_unknown_encodings.append(face_encoding)
-                                name = f"Неизвестный #1"
+                                name = f"Unknown #1"
                         
                         # Рисуем рамку и имя
                         top, right, bottom, left = face_location
                         cv2.rectangle(annotated_frame, (left, top), (right, bottom), color, 2)
                         cv2.rectangle(annotated_frame, (left, bottom - 35), (right, bottom), color, cv2.FILLED)
-                        cv2.putText(annotated_frame, name, (left + 6, bottom - 6), 
+                        cv2.putText(annotated_frame, name, (left + 6, bottom - 6),
                                   cv2.FONT_HERSHEY_DUPLEX, 0.6, (255, 255, 255), 1)
                         
                         # Сохраняем результат
@@ -752,7 +909,7 @@ async def recognize_video(
                         person_appearances[name]["last_seen"] = timestamp
                         person_appearances[name]["total_appearances"] += 1
                     
-                    # Сохраняем ключевой кадр (каждый 5-й обработанный кадр с лицами)
+                    # Сохраняем ключевой кадр
                     if processed_frames % 5 == 0 and len(key_frames) < 10:
                         _, buffer = cv2.imencode('.jpg', annotated_frame)
                         key_frame_base64 = base64.b64encode(buffer).decode('utf-8')
@@ -766,65 +923,57 @@ async def recognize_video(
                     recognition_results.extend(frame_results)
                     processed_frames += 1
                 
-                # Логируем прогресс каждые 30 обработанных кадров
+                # Логируем прогресс
                 if processed_frames % 30 == 0:
-                    logger.info(f"Обработано {processed_frames} кадров из {frame_count // frame_interval}")
+                    logger.info(f"Processed {processed_frames} frames out of {frame_count // frame_interval}")
             
             frame_count += 1
-        
+    
+    finally:
         video_capture.release()
         
-        # Удаляем временный видеофайл
-        os.remove(video_path)
-        logger.info(f"Обработка завершена. Найдено {len(person_appearances)} уникальных лиц")
-        
-        # Формируем итоговую статистику
-        summary = {
-            "total_frames": total_frames,
-            "processed_frames": frame_count // frame_interval if frame_interval > 0 else 0,
-            "fps": round(fps, 2),
-            "duration_seconds": round(total_frames / fps, 2) if fps > 0 else 0,
-            "unique_persons": len(person_appearances),
-            "person_appearances": {
-                name: {
-                    "first_seen": round(data["first_seen"], 2),
-                    "last_seen": round(data["last_seen"], 2),
-                    "total_appearances": data["total_appearances"]
-                }
-                for name, data in person_appearances.items()
+        # Удаляем временный видео файл
+        if os.path.exists(video_path):
+            os.remove(video_path)
+    
+    logger.info(f"Processing completed. Found {len(person_appearances)} unique faces")
+    
+    # Формируем итоговую статистику
+    summary = {
+        "total_frames": total_frames,
+        "processed_frames": frame_count // frame_interval if frame_interval > 0 else 0,
+        "fps": round(fps, 2),
+        "duration_seconds": round(total_frames / fps, 2) if fps > 0 else 0,
+        "unique_persons": len(person_appearances),
+        "person_appearances": {
+            name: {
+                "first_seen": round(data["first_seen"], 2),
+                "last_seen": round(data["last_seen"], 2),
+                "total_appearances": data["total_appearances"]
             }
+            for name, data in person_appearances.items()
         }
-        
-        return {
-            "success": True,
-            "message": f"Видео обработано. Найдено {len(person_appearances)} уникальных лиц",
-            "data": {
-                "summary": summary,
-                "key_frames": key_frames,
-                "total_detections": len(recognition_results),
-                "detections": recognition_results[:100]  # Ограничиваем количество для ответа
-            }
+    }
+    
+    return {
+        "success": True,
+        "message": f"Video processed. Found {len(person_appearances)} unique faces",
+        "data": {
+            "summary": summary,
+            "key_frames": key_frames,
+            "total_detections": len(recognition_results),
+            "detections": recognition_results[:100]  # Ограничиваем размер ответа
         }
-        
-    except Exception as e:
-        logger.error(f"Ошибка при обработке видео: {e}", exc_info=True)
-        return JSONResponse(
-            status_code=500,
-            content={
-                "success": False,
-                "message": f"Ошибка сервера: {str(e)}",
-                "data": None
-            }
-        )
+    }
 
-# Запуск сервера
+# Run server
 if __name__ == "__main__":
-    print("🚀 Запуск Face Recognition API...")
+    print("🚀 Starting Face Recognition API...")
     
     uvicorn.run(
-        "main:app",  # Путь к приложению в формате строки
+        "main:app",  # Application path as string
         host="0.0.0.0",
         port=8000,
         reload=False,
-        reload_dirs=["src"] # Список папок для отслеживания
+        reload_dirs=["src"] # Directories to watch for changes
     )

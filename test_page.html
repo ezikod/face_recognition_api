@@ -3,39 +3,92 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Face Recognition API Test</title>
+    <title>Face Recognition (API Test)</title>
     <style>
-        body {
+       body {
             font-family: Arial, sans-serif;
             max-width: 1200px;
             margin: 0 auto;
             padding: 20px;
-            background-color: #f5f5f5;
+            background-color: #1a1a1a;
+            color: #e0e0e0;
         }
         .container {
-            background: white;
+            background: #2a2a2a;
             padding: 20px;
             border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.3);
             margin-bottom: 20px;
+            position: relative;
+            border: 1px solid #3a3a3a;
+        }
+        .container.disabled {
+            opacity: 0.4;
+            pointer-events: none;
         }
         h1, h2, h3 {
-            color: #333;
+            color: #f0f0f0;
+        }
+        .status-indicator {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: bold;
+        }
+        .status-idle {
+            background-color: #4CAF50;
+            color: white;
+        }
+        .status-busy {
+            background-color: #ff9800;
+            color: white;
+            animation: pulse 1.5s infinite;
+        }
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.7; }
+            100% { opacity: 1; }
         }
         .form-group {
+            margin-bottom: 15px;
+        }
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
             margin-bottom: 15px;
         }
         label {
             display: block;
             margin-bottom: 5px;
             font-weight: bold;
+            color: #b0b0b0;
         }
-        input[type="text"], input[type="file"], input[type="number"] {
+        label .optional {
+            font-weight: normal;
+            font-size: 12px;
+            color: #666;
+            margin-left: 5px;
+        }
+        label .required {
+            color: #ff6b6b;
+            margin-left: 3px;
+        }
+        input[type="text"], input[type="email"], input[type="tel"], input[type="file"], input[type="number"] {
             width: 100%;
-            padding: 8px;
-            border: 1px solid #ddd;
+            padding: 10px;
+            border: 1px solid #444;
             border-radius: 4px;
             box-sizing: border-box;
+            background-color: #1a1a1a;
+            color: #e0e0e0;
+        }
+        input[type="text"]:focus, input[type="email"]:focus, input[type="tel"]:focus, input[type="file"]:focus, input[type="number"]:focus {
+            outline: none;
+            border-color: #4CAF50;
         }
         button {
             background-color: #4CAF50;
@@ -49,6 +102,10 @@
         button:hover {
             background-color: #45a049;
         }
+        button:disabled {
+            background-color: #555;
+            cursor: not-allowed;
+        }
         .btn-danger {
             background-color: #f44336;
         }
@@ -61,25 +118,133 @@
         .btn-info:hover {
             background-color: #0b7dda;
         }
+        .btn-small {
+            padding: 5px 10px;
+            font-size: 12px;
+        }
         .result {
             margin-top: 20px;
             padding: 15px;
-            background-color: #f0f0f0;
+            background-color: #333;
             border-radius: 4px;
             max-height: 500px;
             overflow-y: auto;
+            border: 1px solid #444;
+        }
+        .error-message {
+            color: #ff6b6b;
+            padding: 10px;
+            background-color: #3a1f1f;
+            border-radius: 4px;
+            margin-top: 10px;
+            border: 1px solid #5a2f2f;
+        }
+        .warning-message {
+            color: #ffa726;
+            padding: 10px;
+            background-color: #3a2f1a;
+            border-radius: 4px;
+            margin-top: 10px;
+            border: 1px solid #5a4f2a;
+        }
+        .progress {
+            width: 100%;
+            height: 4px;
+            background-color: #444;
+            border-radius: 2px;
+            overflow: hidden;
+            margin-top: 10px;
+        }
+        .progress-bar {
+            height: 100%;
+            background-color: #4CAF50;
+            animation: progress 2s ease-in-out infinite;
+        }
+        @keyframes progress {
+            0% { width: 0%; }
+            100% { width: 100%; }
         }
         .person-list {
             margin-top: 20px;
         }
         .person-item {
+            border: 1px solid #444;
+            margin-bottom: 10px;
+            border-radius: 4px;
+            background-color: #333;
+            overflow: hidden;
+        }
+        .person-item:hover {
+            background-color: #3a3a3a;
+            border-color: #555;
+        }
+        .person-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            padding: 10px;
-            border: 1px solid #ddd;
+            padding: 15px;
+            cursor: pointer;
+        }
+        .person-header:hover {
+            background-color: #3a3a3a;
+        }
+        .person-info {
+            flex-grow: 1;
+        }
+        .person-info .name {
+            font-weight: bold;
+            color: #4CAF50;
             margin-bottom: 5px;
-            border-radius: 4px;
+            font-size: 16px;
+        }
+        .person-info .details {
+            font-size: 14px;
+            color: #999;
+        }
+        .person-actions {
+            display: flex;
+            gap: 5px;
+            align-items: center;
+        }
+        .expand-icon {
+            margin-left: 10px;
+            font-size: 12px;
+            color: #666;
+            transition: transform 0.3s;
+        }
+        .person-item.expanded .expand-icon {
+            transform: rotate(90deg);
+        }
+        .person-details {
+            display: none;
+            padding: 0 15px 15px 15px;
+            border-top: 1px solid #444;
+            background-color: #2a2a2a;
+        }
+        .person-item.expanded .person-details {
+            display: block;
+        }
+        .detail-row {
+            display: flex;
+            padding: 8px 0;
+            border-bottom: 1px solid #3a3a3a;
+        }
+        .detail-row:last-child {
+            border-bottom: none;
+        }
+        .detail-label {
+            font-weight: bold;
+            color: #999;
+            width: 120px;
+            flex-shrink: 0;
+        }
+        .detail-value {
+            color: #e0e0e0;
+            word-break: break-word;
+        }
+        .detail-value.empty {
+            color: #666;
+            font-style: italic;
         }
         .stats {
             display: grid;
@@ -88,20 +253,21 @@
             margin-top: 20px;
         }
         .stat-card {
-            background: #f8f9fa;
+            background: #333;
             padding: 15px;
             border-radius: 4px;
             text-align: center;
+            border: 1px solid #444;
         }
         .stat-card h3 {
             margin: 0 0 10px 0;
-            color: #666;
+            color: #999;
             font-size: 16px;
         }
         .stat-card .value {
             font-size: 24px;
             font-weight: bold;
-            color: #333;
+            color: #4CAF50;
             word-wrap: break-word;
         }
         .key-frames {
@@ -113,57 +279,170 @@
         .key-frame {
             text-align: center;
             font-size: 12px;
+            background: #333;
+            padding: 10px;
+            border-radius: 4px;
+            border: 1px solid #444;
         }
         .key-frame img {
             max-width: 100%;
             border-radius: 4px;
-            border: 1px solid #ddd;
+            border: 1px solid #555;
+        }
+        .global-status {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: #2a2a2a;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+            z-index: 1000;
+            min-width: 200px;
+            border: 1px solid #3a3a3a;
+        }
+        .global-status h4 {
+            margin: 0 0 10px 0;
+            font-size: 14px;
+            color: #f0f0f0;
+        }
+        .global-status .status-text {
+            font-size: 12px;
+            color: #999;
+        }
+        .faces-list {
+            background: #333;
+            padding: 15px;
+            border-radius: 4px;
+            margin-top: 15px;
+            border: 1px solid #444;
+        }
+        .faces-list h4 {
+            margin-top: 0;
+            color: #4CAF50;
+        }
+        .face-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px;
+            border-bottom: 1px solid #444;
+        }
+        .face-item:last-child {
+            border-bottom: none;
+        }
+        .face-name {
+            color: #e0e0e0;
+        }
+        .face-stats {
+            font-size: 12px;
+            color: #999;
+        }
+        .section-divider {
+            margin: 30px 0;
+            text-align: center;
+            color: #666;
+            font-size: 14px;
+            position: relative;
+        }
+        .section-divider::before,
+        .section-divider::after {
+            content: '';
+            position: absolute;
+            top: 50%;
+            width: 40%;
+            height: 1px;
+            background-color: #444;
+        }
+        .section-divider::before {
+            left: 0;
+        }
+        .section-divider::after {
+            right: 0;
         }
     </style>
 </head>
 <body>
-    <h1>🎭 Face Recognition API Test</h1>
+    <h1>🌐 Database for Face Recognition (API Test)</h1>
     
-    <div class="container">
-        <h2>➕ Add Person</h2>
-        <form id="addPersonForm">
-            <div class="form-group">
-                <label for="personName">Name:</label>
-                <input type="text" id="personName" required>
-            </div>
-            <div class="form-group">
-                <label for="personPhoto">Photo:</label>
-                <input type="file" id="personPhoto" accept="image/*" required>
-            </div>
-            <button type="submit">Add</button>
-        </form>
-         <div id="addResult" class="result" style="display:none;"></div>
+    <!-- Global Status Indicator -->
+    <div class="global-status" id="globalStatus">
+        <h4>API Status</h4>
+        <div class="status-text" id="statusText">Checking...</div>
+        <div class="progress" id="statusProgress" style="display: none;">
+            <div class="progress-bar"></div>
+        </div>
     </div>
     
-    <div class="container">
+    <div class="container" id="addPersonContainer">
+        <h2>➕ Add Person</h2>
+        <span class="status-indicator status-idle" id="addPersonStatus">Ready</span>
+        <form id="addPersonForm">
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="personName">First Name:<span class="required">*</span></label>
+                    <input type="text" id="personName" required>
+                </div>
+                <div class="form-group">
+                    <label for="personLastName">Last Name:<span class="optional">(optional)</span></label>
+                    <input type="text" id="personLastName">
+                </div>
+            </div>
+            
+            <div class="form-group">
+                <label for="personPhoto">Photo:<span class="required">*</span></label>
+                <input type="file" id="personPhoto" accept="image/*" required>
+            </div>
+            
+            <div class="section-divider">Additional Information</div>
+            
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="personWorkplace">Workplace:<span class="optional">(optional)</span></label>
+                    <input type="text" id="personWorkplace" placeholder="Company or organization">
+                </div>
+                <div class="form-group">
+                    <label for="personEmail">Email:<span class="optional">(optional)</span></label>
+                    <input type="email" id="personEmail" placeholder="email@example.com">
+                </div>
+            </div>
+            
+            <div class="form-group">
+                <label for="personPhone">Phone:<span class="optional">(optional)</span></label>
+                <input type="tel" id="personPhone" placeholder="+1234567890">
+            </div>
+            
+            <button type="submit" id="addPersonBtn">Add Person</button>
+            <button type="button" onclick="document.getElementById('addPersonForm').reset()">Clear Form</button>
+        </form>
+        <div id="addResult" class="result" style="display:none;"></div>
+    </div>
+    
+    <div class="container" id="recognizeContainer">
         <h2>🔍 Recognize Face in Photo</h2>
+        <span class="status-indicator status-idle" id="recognizeStatus">Ready</span>
         <form id="recognizeForm">
             <div class="form-group">
                 <label for="recognizePhoto">Photo:</label>
                 <input type="file" id="recognizePhoto" accept="image/*" required>
-             </div>
-            <button type="submit">Recognize</button>
+            </div>
+            <button type="submit" id="recognizeBtn">Recognize</button>
         </form>
         <div id="recognizeResult" class="result" style="display:none;"></div>
     </div>
     
-    <div class="container">
+    <div class="container" id="videoContainer">
         <h2>🎥 Recognize Faces in Video</h2>
+        <span class="status-indicator status-idle" id="videoStatus">Ready</span>
         <form id="recognizeVideoForm">
             <div class="form-group">
                 <label for="recognizeVideo">Video file:</label>
-                 <input type="file" id="recognizeVideo" accept="video/*" required>
+                <input type="file" id="recognizeVideo" accept="video/*" required>
             </div>
             <div class="form-group">
                 <label for="frameInterval">Process every Nth frame:</label>
                 <input type="number" id="frameInterval" value="15" min="1" max="60" style="width: 100px;">
             </div>
-            <button type="submit">Recognize Video</button>
+            <button type="submit" id="videoBtn">Recognize Video</button>
         </form>
         <div id="videoResult" class="result" style="display:none;"></div>
     </div>
@@ -182,23 +461,145 @@
 
     <script>
         const API_URL = 'http://localhost:8000';
+        let apiState = 'idle';
+        let statusCheckInterval = null;
+        
+        // API State Management
+        class APIStateManager {
+            constructor() {
+                this.state = 'idle';
+                this.currentTask = null;
+                this.startStatusPolling();
+            }
+            
+            async checkStatus() {
+                try {
+                    const response = await fetch(`${API_URL}/api/status`);
+                    const result = await response.json();
+                    
+                    if (result.success) {
+                        this.state = result.data.state;
+                        this.currentTask = result.data.current_task;
+                        this.updateUI();
+                    }
+                } catch (error) {
+                    console.error('Status check failed:', error);
+                }
+            }
+            
+            updateUI() {
+                const globalStatus = document.getElementById('statusText');
+                const statusProgress = document.getElementById('statusProgress');
+                
+                if (this.state === 'idle') {
+                    globalStatus.textContent = '✅ Ready';
+                    globalStatus.style.color = '#4CAF50';
+                    statusProgress.style.display = 'none';
+                    this.enableAllForms();
+                } else {
+                    globalStatus.textContent = `⏳ ${this.state}`;
+                    globalStatus.style.color = '#ff9800';
+                    statusProgress.style.display = 'block';
+                    this.disableAllForms();
+                    
+                    if (this.currentTask) {
+                        globalStatus.textContent += ` (${this.currentTask.type})`;
+                    }
+                }
+            }
+            
+            enableAllForms() {
+                document.querySelectorAll('.container').forEach(container => {
+                    container.classList.remove('disabled');
+                });
+                document.querySelectorAll('button[type="submit"]').forEach(btn => {
+                    btn.disabled = false;
+                });
+            }
+            
+            disableAllForms() {
+                document.querySelectorAll('.container').forEach(container => {
+                    if (!container.querySelector('h2')?.textContent.includes('Database') && 
+                        !container.querySelector('h2')?.textContent.includes('Statistics')) {
+                        container.classList.add('disabled');
+                    }
+                });
+                document.querySelectorAll('button[type="submit"]').forEach(btn => {
+                    btn.disabled = true;
+                });
+            }
+            
+            startStatusPolling() {
+                this.checkStatus();
+                statusCheckInterval = setInterval(() => this.checkStatus(), 10000);
+            }
+            
+            stopStatusPolling() {
+                if (statusCheckInterval) {
+                    clearInterval(statusCheckInterval);
+                }
+            }
+        }
+        
+        const stateManager = new APIStateManager();
+        
+        // Helper function for handling API errors
+        async function handleAPIResponse(response) {
+            const result = await response.json();
+            
+            if (response.status === 503) {
+                throw new Error(`System is busy. ${result.message}`);
+            }
+            
+            if (!response.ok) {
+                throw new Error(result.message || `HTTP error! status: ${response.status}`);
+            }
+            
+            return result;
+        }
+        
+        // Toggle person details
+        function togglePersonDetails(personId) {
+            const personItem = document.getElementById(`person-${personId}`);
+            if (personItem) {
+                personItem.classList.toggle('expanded');
+            }
+        }
         
         // --- ADD PERSON ---
         document.getElementById('addPersonForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             const name = document.getElementById('personName').value;
+            const lastName = document.getElementById('personLastName').value;
+            const workplace = document.getElementById('personWorkplace').value;
+            const email = document.getElementById('personEmail').value;
+            const phone = document.getElementById('personPhone').value;
             const photoFile = document.getElementById('personPhoto').files[0];
+            
             const formData = new FormData();
             formData.append('name', name);
             formData.append('photo', photoFile);
             
+            // Add optional fields if they have values
+            if (lastName) formData.append('last_name', lastName);
+            if (workplace) formData.append('workplace', workplace);
+            if (email) formData.append('email', email);
+            if (phone) formData.append('phone', phone);
+            
             const resultDiv = document.getElementById('addResult');
+            const statusIndicator = document.getElementById('addPersonStatus');
+            
             resultDiv.style.display = 'block';
             resultDiv.innerHTML = '<p>⏳ Uploading...</p>';
+            statusIndicator.className = 'status-indicator status-busy';
+            statusIndicator.textContent = 'Processing';
             
             try {
-                const response = await fetch(`${API_URL}/api/person/add`, { method: 'POST', body: formData });
-                const result = await response.json();
+                const response = await fetch(`${API_URL}/api/person/add`, { 
+                    method: 'POST', 
+                    body: formData 
+                });
+                const result = await handleAPIResponse(response);
                 
                 if (result.success) {
                     resultDiv.innerHTML = `<p style="color: green;">✅ ${result.message}</p>`;
@@ -209,7 +610,14 @@
                     resultDiv.innerHTML = `<p style="color: red;">❌ Error: ${result.message}</p>`;
                 }
             } catch (error) {
-                resultDiv.innerHTML = `<p style="color: red;">❌ Network error: ${error.message}</p>`;
+                if (error.message.includes('busy')) {
+                    resultDiv.innerHTML = `<div class="warning-message">⚠️ ${error.message}</div>`;
+                } else {
+                    resultDiv.innerHTML = `<div class="error-message">❌ Error: ${error.message}</div>`;
+                }
+            } finally {
+                statusIndicator.className = 'status-indicator status-idle';
+                statusIndicator.textContent = 'Ready';
             }
         });
         
@@ -221,17 +629,24 @@
             formData.append('photo', photoFile);
             
             const resultDiv = document.getElementById('recognizeResult');
+            const statusIndicator = document.getElementById('recognizeStatus');
+            
             resultDiv.style.display = 'block';
             resultDiv.innerHTML = '<p>⏳ Recognizing...</p>';
+            statusIndicator.className = 'status-indicator status-busy';
+            statusIndicator.textContent = 'Processing';
             
             try {
-                const response = await fetch(`${API_URL}/api/person/recognize`, { method: 'POST', body: formData });
-                const result = await response.json();
+                const response = await fetch(`${API_URL}/api/person/recognize`, { 
+                    method: 'POST', 
+                    body: formData 
+                });
+                const result = await handleAPIResponse(response);
                 
                 if (result.success && result.data.faces_count > 0) {
                     let html = `<h3>Results (Found: ${result.data.faces_count}):</h3>`;
-                    if(result.data.processed_image_base64){
-                       html += `<div style="margin-bottom: 15px;"><img src="data:image/jpeg;base64,${result.data.processed_image_base64}" style="max-width: 100%; border-radius: 4px;"></div>`;
+                    if (result.data.processed_image_base64) {
+                        html += `<div style="margin-bottom: 15px;"><img src="data:image/jpeg;base64,${result.data.processed_image_base64}" style="max-width: 100%; border-radius: 4px;"></div>`;
                     }
                     result.data.faces.forEach(face => {
                         const status = face.name !== "Unknown" ? "✅" : "❓";
@@ -245,7 +660,14 @@
                     resultDiv.innerHTML = `<p style="color: red;">❌ Error: ${result.message || 'Unknown error'}</p>`;
                 }
             } catch (error) {
-                resultDiv.innerHTML = `<p style="color: red;">❌ Network error: ${error.message}</p>`;
+                if (error.message.includes('busy')) {
+                    resultDiv.innerHTML = `<div class="warning-message">⚠️ ${error.message}</div>`;
+                } else {
+                    resultDiv.innerHTML = `<div class="error-message">❌ Error: ${error.message}</div>`;
+                }
+            } finally {
+                statusIndicator.className = 'status-indicator status-idle';
+                statusIndicator.textContent = 'Ready';
             }
         });
 
@@ -254,19 +676,30 @@
             e.preventDefault();
             const videoFile = document.getElementById('recognizeVideo').files[0];
             const frameInterval = document.getElementById('frameInterval').value;
-            if (!videoFile) { alert('Please select a video file'); return; }
+            
+            if (!videoFile) { 
+                alert('Please select a video file'); 
+                return; 
+            }
 
             const formData = new FormData();
             formData.append('video', videoFile);
             formData.append('frame_interval', frameInterval);
 
             const resultDiv = document.getElementById('videoResult');
+            const statusIndicator = document.getElementById('videoStatus');
+            
             resultDiv.style.display = 'block';
-            resultDiv.innerHTML = '<p>⏳ Uploading and processing video... This may take some time.</p>';
+            resultDiv.innerHTML = '<p>⏳ Uploading and processing video... This may take some time.</p><div class="progress"><div class="progress-bar"></div></div>';
+            statusIndicator.className = 'status-indicator status-busy';
+            statusIndicator.textContent = 'Processing Video';
 
             try {
-                const response = await fetch(`${API_URL}/api/video/recognize`, { method: 'POST', body: formData });
-                const result = await response.json();
+                const response = await fetch(`${API_URL}/api/video/recognize`, { 
+                    method: 'POST', 
+                    body: formData 
+                });
+                const result = await handleAPIResponse(response);
 
                 if (result.success && result.data) {
                     const data = result.data;
@@ -288,10 +721,17 @@
                     }
                     resultDiv.innerHTML = html;
                 } else {
-                     resultDiv.innerHTML = `<p style="color: red;">❌ API Error: ${result.message}</p>`;
+                    resultDiv.innerHTML = `<div class="error-message">❌ API Error: ${result.message}</div>`;
                 }
             } catch (error) {
-                 resultDiv.innerHTML = `<p style="color: red;">❌ Critical network error: ${error.message}</p>`;
+                if (error.message.includes('busy')) {
+                    resultDiv.innerHTML = `<div class="warning-message">⚠️ ${error.message}<br>Please wait for the current operation to complete.</div>`;
+                } else {
+                    resultDiv.innerHTML = `<div class="error-message">❌ Error: ${error.message}</div>`;
+                }
+            } finally {
+                statusIndicator.className = 'status-indicator status-idle';
+                statusIndicator.textContent = 'Ready';
             }
         });
         
@@ -305,14 +745,47 @@
                 container.innerHTML = '';
                 if (result.success && result.data.persons && result.data.persons.length > 0) {
                     result.data.persons.forEach(person => {
+                        const fullName = person.last_name ? `${person.name} ${person.last_name}` : person.name;
+                        const hasDetails = person.workplace || person.email || person.phone;
+                        
                         const item = document.createElement('div');
                         item.className = 'person-item';
-                         item.innerHTML = `
-                            <div><strong>#${person.id}</strong> ${person.name}</div>
-                            <div>
-                                <button class="btn-info" onclick="viewPersonPhoto(${person.id})">View</button>
-                                <button class="btn-danger" onclick="deletePerson(${person.id}, '${person.name.replace(/'/g, "\\'")}')">Delete</button>
+                        item.id = `person-${person.id}`;
+                        
+                        item.innerHTML = `
+                            <div class="person-header" onclick="togglePersonDetails(${person.id})">
+                                <div class="person-info">
+                                    <div class="name">#${person.id} ${fullName}</div>
+                                    <div class="details">Added: ${person.added_date}</div>
+                                </div>
+                                <div class="person-actions">
+                                    <button class="btn-info btn-small" onclick="event.stopPropagation(); viewPersonPhoto(${person.id})">View Photo</button>
+                                    <button class="btn-danger btn-small" onclick="event.stopPropagation(); deletePerson(${person.id}, '${fullName.replace(/'/g, "\\'")}')">Delete</button>
+                                    ${hasDetails ? '<span class="expand-icon">▶</span>' : ''}
+                                </div>
                             </div>
+                            ${hasDetails ? `
+                                <div class="person-details">
+                                    ${person.workplace ? `
+                                        <div class="detail-row">
+                                            <div class="detail-label">Workplace:</div>
+                                            <div class="detail-value">${person.workplace}</div>
+                                        </div>
+                                    ` : ''}
+                                    ${person.email ? `
+                                        <div class="detail-row">
+                                            <div class="detail-label">Email:</div>
+                                            <div class="detail-value">${person.email}</div>
+                                        </div>
+                                    ` : ''}
+                                    ${person.phone ? `
+                                        <div class="detail-row">
+                                            <div class="detail-label">Phone:</div>
+                                            <div class="detail-value">${person.phone}</div>
+                                        </div>
+                                    ` : ''}
+                                </div>
+                            ` : ''}
                         `;
                         container.appendChild(item);
                     });
@@ -335,10 +808,29 @@
                 const result = await response.json();
 
                 if (result.success && result.data && result.data.photo_base64) {
-                    resultDiv.innerHTML = `
-                        <h3>Photo for: ${result.data.name}</h3>
-                        <img src="data:image/jpeg;base64,${result.data.photo_base64}" style="max-width: 100%; border-radius: 4px;">
-                    `;
+                    const fullName = result.data.last_name ? 
+                        `${result.data.name} ${result.data.last_name}` : 
+                        result.data.name;
+                    
+                    let html = `<h3>Photo for: ${fullName}</h3>`;
+                    html += `<img src="data:image/jpeg;base64,${result.data.photo_base64}" style="max-width: 100%; border-radius: 4px;">`;
+                    
+                    // Show additional details if available
+                    if (result.data.workplace || result.data.email || result.data.phone) {
+                        html += '<div style="margin-top: 15px; padding: 15px; background: #2a2a2a; border-radius: 4px;">';
+                        if (result.data.workplace) {
+                            html += `<p><strong>Workplace:</strong> ${result.data.workplace}</p>`;
+                        }
+                        if (result.data.email) {
+                            html += `<p><strong>Email:</strong> ${result.data.email}</p>`;
+                        }
+                        if (result.data.phone) {
+                            html += `<p><strong>Phone:</strong> ${result.data.phone}</p>`;
+                        }
+                        html += '</div>';
+                    }
+                    
+                    resultDiv.innerHTML = html;
                 } else if (result.success && result.data && !result.data.photo_base64) {
                     resultDiv.innerHTML = `<p style="color: orange;">⚠️ Photo file not found for ${result.data.name}</p>`;
                 } else {
@@ -367,7 +859,7 @@
             }
         }
         
-        // --- LOAD STATS (updated) ---
+        // --- LOAD STATS ---
         async function loadStats() {
             try {
                 const response = await fetch(`${API_URL}/api/stats`);
@@ -398,8 +890,14 @@
                         `;
                     }
 
-                    if (stats.storage_path) {
-                        container.innerHTML += createStatCard("Upload Folder", stats.storage_path);
+                    if (stats.api_state) {
+                        const stateColor = stats.api_state === 'idle' ? '#4CAF50' : '#ff9800';
+                        container.innerHTML += `
+                            <div class="stat-card">
+                                <h3>API State</h3>
+                                <div class="value" style="color: ${stateColor};">${stats.api_state}</div>
+                            </div>
+                        `;
                     }
                 }
             } catch (error) {
@@ -412,6 +910,11 @@
             loadPersons();
             loadStats();
         };
+        
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            stateManager.stopStatusPolling();
+        });
     </script>
 </body>
 </html>
