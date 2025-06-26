@@ -450,6 +450,8 @@
     <div class="container">
         <h2>👥 Database</h2>
         <button onclick="loadPersons()" class="btn-info">Refresh List</button>
+        <button onclick="checkDebugInfo()" class="btn-info">Debug Files</button>
+        <button onclick="migrateOldData()" class="btn-info" style="background-color: #ff9800;">Migrate Old Data</button>
         <div id="personsList" class="person-list"></div>
     </div>
     
@@ -902,6 +904,80 @@
                 }
             } catch (error) {
                 document.getElementById('statsContainer').innerHTML = `<p style="color: red;">Error loading statistics: ${error.message}</p>`;
+            }
+        }
+        
+        // --- DEBUG CHECK ---
+        async function checkDebugInfo() {
+            try {
+                const response = await fetch(`${API_URL}/api/debug/files`);
+                const result = await response.json();
+                
+                if (result.success) {
+                    let message = "🔍 Debug Information:\n\n";
+                    message += `📁 Working Directory: ${result.data.working_directory}\n`;
+                    message += `📄 CSV File: ${result.data.csv_file_path}\n`;
+                    message += `✅ CSV Exists: ${result.data.csv_exists}\n`;
+                    message += `📊 CSV Lines: ${result.data.csv_lines || 0}\n`;
+                    
+                    if (result.data.loaded_in_memory) {
+                        message += `\n💾 Data in Memory:\n`;
+                        message += `- Names loaded: ${result.data.loaded_in_memory.known_names}\n`;
+                        message += `- Encodings loaded: ${result.data.loaded_in_memory.known_encodings}\n`;
+                        message += `- IDs loaded: ${result.data.loaded_in_memory.known_ids}\n`;
+                        if (result.data.loaded_in_memory.sample_names.length > 0) {
+                            message += `- Sample names: ${result.data.loaded_in_memory.sample_names.join(', ')}\n`;
+                        }
+                    }
+                    
+                    if (result.data.old_csv_exists) {
+                        message += `\n⚠️ OLD CSV FOUND!\n`;
+                        message += `Location: ../persons_data.csv\n`;
+                        message += `Lines in old CSV: ${result.data.old_csv_lines}\n`;
+                        message += `Lines in current CSV: ${result.data.csv_lines || 0}\n`;
+                        
+                        if (result.data.old_csv_lines > (result.data.csv_lines || 0)) {
+                            message += `\n🚨 The old CSV has MORE data than the current one!\n`;
+                            message += `The system may have migrated to a new location.\n`;
+                            message += `Please restart the API server to copy data from old location.`;
+                        }
+                    }
+                    
+                    if (result.data.backup_exists) {
+                        message += `\n💾 Backup file exists with ${result.data.backup_lines} lines`;
+                    }
+                    
+                    console.log('Debug info:', result.data);
+                    alert(message);
+                } else {
+                    alert('Debug check failed: ' + result.message);
+                }
+            } catch (error) {
+                alert('Debug error: ' + error.message);
+            }
+        }
+        
+        // --- MIGRATE OLD DATA ---
+        async function migrateOldData() {
+            if (!confirm('This will copy data from ../persons_data.csv to the current location. Continue?')) {
+                return;
+            }
+            
+            try {
+                const response = await fetch(`${API_URL}/api/migrate/old-data`, {
+                    method: 'POST'
+                });
+                const result = await response.json();
+                
+                if (result.success) {
+                    alert(`✅ Migration successful!\n\nCSV copied: ${result.data.csv_copied}\nImages copied: ${result.data.images_copied}\nPersons loaded: ${result.data.persons_loaded}`);
+                    loadPersons();
+                    loadStats();
+                } else {
+                    alert(`❌ Migration failed: ${result.message}`);
+                }
+            } catch (error) {
+                alert('Migration error: ' + error.message);
             }
         }
         

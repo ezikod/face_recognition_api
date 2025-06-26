@@ -117,8 +117,8 @@ async def log_requests(request: Request, call_next):
     return response
 
 # Global variables
-CSV_FILE = "../persons_data.csv"
-UPLOAD_DIR = "../uploads"
+CSV_FILE = "persons_data.csv"  # Changed to current directory
+UPLOAD_DIR = "uploads"  # Changed to current directory
 known_encodings = []
 known_names = []
 known_ids = []
@@ -144,12 +144,154 @@ class RecognitionResult(BaseModel):
     location: dict
 
 # Initialization
+def check_and_copy_old_data():
+    """Check for data in old location and copy if needed"""
+    old_csv = "../persons_data.csv"
+    old_uploads = "../uploads"
+    
+    # First, check if we need to copy from old location
+    if os.path.exists(old_csv):
+        logger.info(f"Found old CSV at {old_csv}")
+        
+        if not os.path.exists(CSV_FILE):
+            # New CSV doesn't exist, copy from old
+            logger.info(f"New CSV doesn't exist, copying from old location")
+            try:
+                import shutil
+                shutil.copy2(old_csv, CSV_FILE)
+                logger.info(f"Copied CSV from {old_csv} to {CSV_FILE}")
+                
+                # Also copy uploads directory if exists
+                if os.path.exists(old_uploads):
+                    if not os.path.exists(UPLOAD_DIR):
+                        shutil.copytree(old_uploads, UPLOAD_DIR)
+                        logger.info(f"Copied uploads from {old_uploads} to {UPLOAD_DIR}")
+                    else:
+                        # Copy individual files that don't exist
+                        for file in os.listdir(old_uploads):
+                            old_file = os.path.join(old_uploads, file)
+                            new_file = os.path.join(UPLOAD_DIR, file)
+                            if not os.path.exists(new_file) and os.path.isfile(old_file):
+                                shutil.copy2(old_file, new_file)
+                                logger.info(f"Copied file {file} to new uploads directory")
+            except Exception as e:
+                logger.error(f"Error copying old data: {e}")
+        else:
+            # Both files exist, compare them
+            with open(old_csv, 'r') as f:
+                old_lines = len(f.readlines())
+            with open(CSV_FILE, 'r') as f:
+                new_lines = len(f.readlines())
+            
+            if old_lines > new_lines:
+                logger.warning(f"⚠️ Old CSV has {old_lines} lines, new CSV has {new_lines} lines")
+                logger.warning(f"The old file has more data! Consider backing up and manually merging.")
+                
+                # Create a special backup of the old file
+                backup_name = f"persons_data_old_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+                import shutil
+                shutil.copy2(old_csv, backup_name)
+                logger.info(f"Created backup of old file: {backup_name}")
+
+def migrate_csv_if_needed():
+    """Migrate old CSV format to new format with extended fields"""
+    if not os.path.exists(CSV_FILE):
+        logger.info(f"CSV file not found at {CSV_FILE}")
+        return
+    
+    try:
+        # Create backup
+        backup_file = CSV_FILE + ".backup"
+        import shutil
+        shutil.copy2(CSV_FILE, backup_file)
+        logger.info(f"Created backup at {backup_file}")
+        
+        # Read existing data
+        rows = []
+        needs_migration = False
+        row_count = 0
+        
+        with open(CSV_FILE, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            try:
+                header = next(reader)
+                logger.info(f"Current header: {header}")
+                
+                # Check if migration is needed
+                if len(header) < 9 or header[2] != 'Last Name':
+                    needs_migration = True
+                    header = ['ID', 'Name', 'Last Name', 'Workplace', 'Email', 'Phone', 'Date Added', 'Photo Path', 'Face Encoding']
+                    logger.info(f"Migration needed. New header: {header}")
+                
+                rows.append(header)
+                
+                for row in reader:
+                    row_count += 1
+                    if len(row) < 9:
+                        # Old format: [ID, Name, Date Added, Photo Path, Face Encoding]
+                        if len(row) >= 5:
+                            # Update photo path if it points to old location
+                            photo_path = row[3]
+                            if photo_path.startswith("../uploads/"):
+                                photo_path = photo_path.replace("../uploads/", "uploads/")
+                                logger.info(f"Updated photo path from {row[3]} to {photo_path}")
+                            
+                            migrated_row = [
+                                row[0],  # ID
+                                row[1],  # Name
+                                "",      # Last Name (empty)
+                                "",      # Workplace (empty)
+                                "",      # Email (empty)
+                                "",      # Phone (empty)
+                                row[2],  # Date Added
+                                photo_path,  # Updated Photo Path
+                                row[4]   # Face Encoding
+                            ]
+                            rows.append(migrated_row)
+                            logger.info(f"Migrated row {row[0]}: {row[1]}")
+                        else:
+                            logger.warning(f"Skipping incomplete row: {row}")
+                    else:
+                        # Even in new format, check and update photo paths
+                        if len(row) > 7 and row[7].startswith("../uploads/"):
+                            row[7] = row[7].replace("../uploads/", "uploads/")
+                            logger.info(f"Updated photo path in new format row")
+                        rows.append(row)
+                        
+            except StopIteration:
+                logger.info("CSV file is empty (no data rows)")
+        
+        logger.info(f"Read {row_count} data rows from CSV")
+        
+        # Write migrated data if needed
+        if needs_migration and len(rows) > 1:
+            with open(CSV_FILE, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerows(rows)
+            logger.info(f"CSV file migrated successfully. Wrote {len(rows)-1} data rows")
+            
+            # Verify the migration
+            with open(CSV_FILE, 'r', encoding='utf-8') as f:
+                verify_rows = list(csv.reader(f))
+                logger.info(f"Verification: CSV now has {len(verify_rows)} rows (including header)")
+        elif needs_migration:
+            logger.warning("Migration needed but no data rows found")
+    
+    except Exception as e:
+        logger.error(f"Error during CSV migration: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+
 def init_csv():
     """Initialize CSV file with extended fields"""
     if not os.path.exists(CSV_FILE):
+        logger.info(f"Creating new CSV file at {CSV_FILE}")
         with open(CSV_FILE, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             writer.writerow(['ID', 'Name', 'Last Name', 'Workplace', 'Email', 'Phone', 'Date Added', 'Photo Path', 'Face Encoding'])
+        logger.info("CSV file created successfully")
+    else:
+        logger.info(f"CSV file already exists at {CSV_FILE}")
 
 def load_data():
     """Load data from CSV"""
@@ -160,26 +302,44 @@ def load_data():
     
     try:
         if os.path.exists(CSV_FILE):
+            logger.info(f"Loading data from {CSV_FILE}")
             with open(CSV_FILE, 'r', encoding='utf-8') as f:
                 reader = csv.reader(f)
-                next(reader)  # Skip header
+                header = next(reader)  # Skip header
+                logger.info(f"CSV header: {header}")
                 
+                row_count = 0
                 for row in reader:
-                    if len(row) >= 9:  # Updated to include all fields
+                    row_count += 1
+                    # Handle both old and new formats
+                    if len(row) >= 9:  # New format
                         person_id = int(row[0])
                         name = row[1]
-                        encoding_str = row[8]  # Face encoding is now at index 8
-                        
-                        if encoding_str:
+                        encoding_str = row[8]
+                    elif len(row) >= 5:  # Old format
+                        person_id = int(row[0])
+                        name = row[1]
+                        encoding_str = row[4]
+                    else:
+                        logger.warning(f"Skipping invalid row: {row}")
+                        continue
+                    
+                    if encoding_str:
+                        try:
                             encoding = np.array(json.loads(encoding_str))
                             known_encodings.append(encoding)
                             known_names.append(name)
                             known_ids.append(person_id)
-            logger.info(f"Loaded {len(known_names)} records from database")
+                        except json.JSONDecodeError:
+                            logger.error(f"Failed to decode encoding for {name} (ID: {person_id})")
+                
+                logger.info(f"Loaded {len(known_names)} valid records from {row_count} total rows")
         else:
-            logger.info("Database is empty, created new file")
+            logger.info(f"CSV file not found at {CSV_FILE}, will be created on first add")
     except Exception as e:
         logger.error(f"Error loading data: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
 
 # Helper functions
 def save_uploaded_file(upload_file: UploadFile) -> str:
@@ -189,7 +349,10 @@ def save_uploaded_file(upload_file: UploadFile) -> str:
         filename = f"{timestamp}_{upload_file.filename}"
         file_path = os.path.join(UPLOAD_DIR, filename)
         
+        # Reset file position to beginning
+        upload_file.file.seek(0)
         content = upload_file.file.read()
+        
         with open(file_path, "wb") as f:
             f.write(content)
         
@@ -268,8 +431,25 @@ def check_api_state(state_type: ProcessingState):
     return decorator
 
 # Load data on startup
+logger.info(f"Starting Face Recognition API...")
+logger.info(f"Working directory: {os.getcwd()}")
+logger.info(f"CSV file path: {os.path.abspath(CSV_FILE)}")
+logger.info(f"Upload directory: {os.path.abspath(UPLOAD_DIR)}")
+
+check_and_copy_old_data()
 init_csv()
+migrate_csv_if_needed()
 load_data()
+
+# Debug: Check CSV content after startup
+if os.path.exists(CSV_FILE):
+    with open(CSV_FILE, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+        logger.info(f"CSV file has {len(lines)} lines (including header)")
+        if len(lines) > 0:
+            logger.info(f"First line (header): {lines[0].strip()}")
+        if len(lines) > 1:
+            logger.info(f"Sample data row: {lines[1].strip()}")
 
 # API Endpoints
 @app.get("/")
@@ -307,6 +487,204 @@ async def get_status():
             "current_task": api_state.current_task_info
         }
     }
+
+@app.get("/api/debug/files",
+         response_model=ApiResponse,
+         tags=["System"],
+         summary="Debug: Check file locations")
+async def debug_files():
+    """Debug endpoint to check file locations and contents"""
+    try:
+        debug_info = {
+            "working_directory": os.getcwd(),
+            "csv_file_path": os.path.abspath(CSV_FILE),
+            "csv_exists": os.path.exists(CSV_FILE),
+            "upload_dir_path": os.path.abspath(UPLOAD_DIR),
+            "upload_dir_exists": os.path.exists(UPLOAD_DIR)
+        }
+        
+        # Check CSV content
+        if os.path.exists(CSV_FILE):
+            with open(CSV_FILE, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+                debug_info["csv_lines"] = len(lines)
+                debug_info["csv_header"] = lines[0].strip() if lines else "No header"
+                debug_info["csv_sample"] = lines[1].strip() if len(lines) > 1 else "No data"
+        
+        # Check for backup file
+        backup_file = CSV_FILE + ".backup"
+        if os.path.exists(backup_file):
+            debug_info["backup_exists"] = True
+            with open(backup_file, 'r', encoding='utf-8') as f:
+                backup_lines = f.readlines()
+                debug_info["backup_lines"] = len(backup_lines)
+        
+        # Check upload directory
+        if os.path.exists(UPLOAD_DIR):
+            files = os.listdir(UPLOAD_DIR)
+            debug_info["upload_files_count"] = len(files)
+            debug_info["upload_files"] = files[:5]  # First 5 files
+        
+        # Check for old location
+        old_csv = "../persons_data.csv"
+        if os.path.exists(old_csv):
+            debug_info["old_csv_exists"] = True
+            with open(old_csv, 'r', encoding='utf-8') as f:
+                old_lines = f.readlines()
+                debug_info["old_csv_lines"] = len(old_lines)
+        
+        # Check memory state
+        debug_info["loaded_in_memory"] = {
+            "known_names": len(known_names),
+            "known_encodings": len(known_encodings),
+            "known_ids": len(known_ids),
+            "sample_names": known_names[:3] if known_names else [],
+            "sample_ids": known_ids[:3] if known_ids else []
+        }
+    except Exception as e:
+        logger.error(f"Error during debug files check: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "message": f"Debug error: {str(e)}",
+                "data": None
+            }
+        )
+    
+@app.post("/api/migrate/old-data",
+          response_model=ApiResponse,
+          tags=["System"],
+          summary="Manually migrate data from old location")
+async def migrate_old_data():
+    """Manually copy data from old location (../persons_data.csv) to new location"""
+    try:
+        old_csv = "../persons_data.csv"
+        old_uploads = "../uploads"
+        
+        if not os.path.exists(old_csv):
+            return {
+                "success": False,
+                "message": "No old CSV file found at ../persons_data.csv",
+                "data": None
+            }
+        
+        # Backup current data if exists
+        if os.path.exists(CSV_FILE):
+            backup_name = f"persons_data_before_migration_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            import shutil
+            shutil.copy2(CSV_FILE, backup_name)
+            logger.info(f"Backed up current CSV to {backup_name}")
+        
+        # Copy CSV file
+        import shutil
+        shutil.copy2(old_csv, CSV_FILE)
+        logger.info(f"Copied {old_csv} to {CSV_FILE}")
+        
+        # Copy uploads if they exist
+        copied_files = 0
+        if os.path.exists(old_uploads):
+            os.makedirs(UPLOAD_DIR, exist_ok=True)
+            for file in os.listdir(old_uploads):
+                old_file = os.path.join(old_uploads, file)
+                new_file = os.path.join(UPLOAD_DIR, file)
+                if os.path.isfile(old_file):
+                    shutil.copy2(old_file, new_file)
+                    copied_files += 1
+        
+        # Now migrate the CSV to new format and update paths
+        migrate_csv_if_needed()
+        
+        # Reload data
+        load_data()
+        
+        return {
+            "success": True,
+            "message": f"Successfully migrated data from old location. Copied {copied_files} image files.",
+            "data": {
+                "csv_copied": True,
+                "images_copied": copied_files,
+                "persons_loaded": len(known_names)
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Error during manual migration: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "message": f"Migration error: {str(e)}",
+                "data": None
+            }
+        )
+
+@app.post("/api/migrate/old-data",
+          response_model=ApiResponse,
+          tags=["System"],
+          summary="Manually migrate data from old location")
+async def migrate_old_data():
+    """Manually copy data from old location (../persons_data.csv) to new location"""
+    try:
+        old_csv = "../persons_data.csv"
+        old_uploads = "../uploads"
+        
+        if not os.path.exists(old_csv):
+            return {
+                "success": False,
+                "message": "No old CSV file found at ../persons_data.csv",
+                "data": None
+            }
+        
+        # Backup current data if exists
+        if os.path.exists(CSV_FILE):
+            backup_name = f"persons_data_before_migration_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            import shutil
+            shutil.copy2(CSV_FILE, backup_name)
+            logger.info(f"Backed up current CSV to {backup_name}")
+        
+        # Copy CSV file
+        import shutil
+        shutil.copy2(old_csv, CSV_FILE)
+        logger.info(f"Copied {old_csv} to {CSV_FILE}")
+        
+        # Copy uploads if they exist
+        copied_files = 0
+        if os.path.exists(old_uploads):
+            os.makedirs(UPLOAD_DIR, exist_ok=True)
+            for file in os.listdir(old_uploads):
+                old_file = os.path.join(old_uploads, file)
+                new_file = os.path.join(UPLOAD_DIR, file)
+                if os.path.isfile(old_file):
+                    shutil.copy2(old_file, new_file)
+                    copied_files += 1
+        
+        # Now migrate the CSV to new format and update paths
+        migrate_csv_if_needed()
+        
+        # Reload data
+        load_data()
+        
+        return {
+            "success": True,
+            "message": f"Successfully migrated data from old location. Copied {copied_files} image files.",
+            "data": {
+                "csv_copied": True,
+                "images_copied": copied_files,
+                "persons_loaded": len(known_names)
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Error during manual migration: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "message": f"Migration error: {str(e)}",
+                "data": None
+            }
+        )
     
 
 @app.post("/api/person/add",
@@ -512,7 +890,7 @@ async def list_persons():
                 next(reader)  # Skip header
                 
                 for row in reader:
-                    if len(row) >= 8:  # Updated to handle extended fields
+                    if len(row) >= 8:  # New format
                         person_data = {
                             "id": int(row[0]),
                             "name": row[1],
@@ -522,6 +900,18 @@ async def list_persons():
                             "phone": row[5] if row[5] else None,
                             "added_date": row[6],
                             "photo_path": row[7]
+                        }
+                        persons.append(person_data)
+                    elif len(row) >= 5:  # Old format
+                        person_data = {
+                            "id": int(row[0]),
+                            "name": row[1],
+                            "last_name": None,
+                            "workplace": None,
+                            "email": None,
+                            "phone": None,
+                            "added_date": row[2],
+                            "photo_path": row[3]
                         }
                         persons.append(person_data)
         
@@ -558,19 +948,20 @@ async def get_person(person_id: int):
             
             for row in reader:
                 if len(row) >= 8 and int(row[0]) == person_id:
+                    # Handle both old and new format
                     return JSONResponse(content={
                         "success": True,
                         "message": "Person found",
                         "data": {
                             "id": int(row[0]),
                             "name": row[1],
-                            "last_name": row[2] if row[2] else None,
-                            "workplace": row[3] if row[3] else None,
-                            "email": row[4] if row[4] else None,
-                            "phone": row[5] if row[5] else None,
-                            "added_date": row[6],
-                            "photo_path": row[7],
-                            "photo_base64": image_to_base64(row[7]) if os.path.exists(row[7]) else None
+                            "last_name": row[2] if len(row) > 2 and row[2] else None,
+                            "workplace": row[3] if len(row) > 3 and row[3] else None,
+                            "email": row[4] if len(row) > 4 and row[4] else None,
+                            "phone": row[5] if len(row) > 5 and row[5] else None,
+                            "added_date": row[6] if len(row) > 6 else row[2],  # Handle old format
+                            "photo_path": row[7] if len(row) > 7 else row[3],  # Handle old format
+                            "photo_base64": image_to_base64(row[7] if len(row) > 7 else row[3]) if os.path.exists(row[7] if len(row) > 7 else row[3]) else None
                         }
                     })
         
@@ -591,22 +982,30 @@ async def delete_person(person_id: int):
         rows = []
         deleted = False
         deleted_name = ""
+        photo_path = ""
         
         with open(CSV_FILE, 'r', encoding='utf-8') as f:
             reader = csv.reader(f)
             rows.append(next(reader))  # Header
             
             for row in reader:
-                if len(row) >= 8 and int(row[0]) != person_id:
+                if len(row) >= 5 and int(row[0]) != person_id:
                     rows.append(row)
-                elif int(row[0]) == person_id:
+                elif len(row) >= 5 and int(row[0]) == person_id:
                     deleted = True
                     deleted_name = row[1]
-                    if row[2]:  # Add last name if exists
-                        deleted_name += f" {row[2]}"
+                    
+                    # Handle different formats
+                    if len(row) >= 9:  # New format
+                        if row[2]:  # Add last name if exists
+                            deleted_name += f" {row[2]}"
+                        photo_path = row[7]
+                    else:  # Old format
+                        photo_path = row[3]
+                    
                     # Delete photo file if exists
-                    if os.path.exists(row[7]):
-                        os.remove(row[7])
+                    if photo_path and os.path.exists(photo_path):
+                        os.remove(photo_path)
         
         if not deleted:
             return JSONResponse(
@@ -661,13 +1060,18 @@ async def get_stats():
                 reader = list(csv.reader(f))
                 if len(reader) > 1:
                     last_row = reader[-1]
-                    if len(last_row) >= 7:
+                    if len(last_row) >= 9:  # New format
                         full_name = last_row[1]
                         if last_row[2]:  # Add last name if exists
                             full_name += f" {last_row[2]}"
                         last_added = {
                             "name": full_name,
                             "date": last_row[6]
+                        }
+                    elif len(last_row) >= 5:  # Old format
+                        last_added = {
+                            "name": last_row[1],
+                            "date": last_row[2]
                         }
         
         return {
