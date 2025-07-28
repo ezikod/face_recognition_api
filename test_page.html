@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Face Recognition (API Test)</title>
     <style>
-       body {
+        body {
             font-family: Arial, sans-serif;
             max-width: 1200px;
             margin: 0 auto;
@@ -362,9 +362,8 @@
     </style>
 </head>
 <body>
-    <h1>🌐 Database for Face Recognition (API Test)</h1>
+    <h1>🌐 Face Recognition with Database (API Test)</h1>
     
-    <!-- Global Status Indicator -->
     <div class="global-status" id="globalStatus">
         <h4>API Status</h4>
         <div class="status-text" id="statusText">Checking...</div>
@@ -554,7 +553,7 @@
             }
             
             if (!response.ok) {
-                throw new Error(result.message || `HTTP error! status: ${response.status}`);
+                throw new Error(result.detail || result.message || `HTTP error! status: ${response.status}`);
             }
             
             return result;
@@ -582,7 +581,6 @@
             formData.append('name', name);
             formData.append('photo', photoFile);
             
-            // Add optional fields if they have values
             if (lastName) formData.append('last_name', lastName);
             if (workplace) formData.append('workplace', workplace);
             if (email) formData.append('email', email);
@@ -647,15 +645,28 @@
                 
                 if (result.success && result.data.faces_count > 0) {
                     let html = `<h3>Results (Found: ${result.data.faces_count}):</h3>`;
+                    
+                    // Display processed image
                     if (result.data.processed_image_base64) {
                         html += `<div style="margin-bottom: 15px;"><img src="data:image/jpeg;base64,${result.data.processed_image_base64}" style="max-width: 100%; border-radius: 4px;"></div>`;
                     }
+                    
+                    // Display list of detected faces
+                    html += '<div class="faces-list">';
+                    html += '<h4>Detected Faces:</h4>';
                     result.data.faces.forEach(face => {
-                        const status = face.name !== "Unknown" ? "✅" : "❓";
-                        const color = face.name !== "Unknown" ? "green" : "red";
-                        html += `<div style="margin: 5px 0; padding: 10px; border: 1px solid ${color}; border-radius: 4px;"><strong>${status} ${face.name}</strong></div>`;
+                        const isKnown = face.name !== "Unknown";
+                        const icon = isKnown ? '✅' : '❓';
+                        html += `
+                            <div class="face-item">
+                                <span class="face-name">${icon} ${face.name}</span>
+                            </div>
+                        `;
                     });
+                    html += '</div>';
+                    
                     resultDiv.innerHTML = html;
+
                 } else if (result.success && result.data.faces_count === 0) {
                     resultDiv.innerHTML = '<p style="color: orange;">⚠️ No faces found in photo</p>';
                 } else {
@@ -706,9 +717,11 @@
                 if (result.success && result.data) {
                     const data = result.data;
                     let html = `<h3>✅ Video Processing Results</h3>`;
+                    
                     if (data.summary) {
                         html += `<p>Duration: ${data.summary.duration_seconds.toFixed(1)} sec | Unique faces: ${data.summary.unique_persons}</p>`;
                     }
+                    
                     if (data.key_frames && data.key_frames.length > 0) {
                         html += `<h4>Key Frames:</h4><div class="key-frames">`;
                         data.key_frames.forEach(frame => {
@@ -721,6 +734,25 @@
                         });
                         html += `</div>`;
                     }
+                    
+                    // Display summary of detected people
+                    if (data.summary && data.summary.person_appearances) {
+                        html += '<div class="faces-list">';
+                        html += '<h4>Detected Persons Summary:</h4>';
+                        Object.keys(data.summary.person_appearances).forEach(name => {
+                            const appearance = data.summary.person_appearances[name];
+                            const isKnown = !name.startsWith("Unknown");
+                            const icon = isKnown ? '✅' : '❓';
+                            html += `
+                                <div class="face-item">
+                                    <span class="face-name">${icon} ${name}</span>
+                                    <span class="face-stats">Appeared ${appearance.total_appearances} times (from ${appearance.first_seen}s to ${appearance.last_seen}s)</span>
+                                </div>
+                            `;
+                        });
+                        html += '</div>';
+                    }
+                    
                     resultDiv.innerHTML = html;
                 } else {
                     resultDiv.innerHTML = `<div class="error-message">❌ API Error: ${result.message}</div>`;

@@ -9,7 +9,7 @@ import uvicorn
 import numpy as np
 from PIL import Image
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Dict
 import asyncio
 from enum import Enum
 
@@ -48,20 +48,27 @@ api_state = APIState()
 # These models will be displayed in Swagger (/docs)
 
 class FaceLocation(BaseModel):
-    top: int
-    right: int
-    bottom: int
-    left: int
+    top: int = Field(..., description="Top coordinate of face bounding box")
+    right: int = Field(..., description="Right coordinate of face bounding box")
+    bottom: int = Field(..., description="Bottom coordinate of face bounding box")
+    left: int = Field(..., description="Left coordinate of face bounding box")
 
-class FaceData(BaseModel):
-    name: str
-    location: FaceLocation
-    encoding: List[float] = Field(..., description="Face feature vector of 128 numbers.")
+class RecognizedFace(BaseModel):
+    person_id: int = Field(..., description="Person ID from database (0 for unknown)")
+    name: str = Field(..., description="Person's first name")
+    last_name: Optional[str] = Field(None, description="Person's last name")
+    workplace: Optional[str] = Field(None, description="Person's workplace")
+    email: Optional[str] = Field(None, description="Person's email address")
+    phone: Optional[str] = Field(None, description="Person's phone number")
+    added_date: Optional[str] = Field(None, description="Date when person was added to database")
+    confidence: float = Field(..., description="Recognition confidence (0.0-1.0)")
+    location: FaceLocation = Field(..., description="Face coordinates on image")
+    encoding: List[float] = Field(..., description="Face feature vector of 128 numbers")
 
 class RecognitionResponseData(BaseModel):
-    faces_count: int
-    faces: List[FaceData]
-    processed_image_base64: str = Field(..., description="Image with drawn bounding boxes in Base64 format.")
+    faces_count: int = Field(..., description="Total number of faces found")
+    faces: List[RecognizedFace] = Field(..., description="List of recognized faces with full person data")
+    processed_image_base64: str = Field(..., description="Image with drawn bounding boxes in Base64 format")
 
 class PersonInDB(BaseModel):
     id: int
@@ -74,29 +81,72 @@ class PersonInDB(BaseModel):
     photo_path: str
 
 class AddPersonResponseData(BaseModel):
-    id: int
-    name: str
-    last_name: Optional[str] = None
-    workplace: Optional[str] = None
-    email: Optional[str] = None
-    phone: Optional[str] = None
-    faces_found: int
+    """Response data for add person endpoint"""
+    id: int = Field(..., description="Assigned person ID")
+    name: str = Field(..., description="Person's first name")
+    last_name: Optional[str] = Field(None, description="Person's last name")
+    workplace: Optional[str] = Field(None, description="Person's workplace")
+    email: Optional[str] = Field(None, description="Person's email")
+    phone: Optional[str] = Field(None, description="Person's phone")
+    faces_found: int = Field(..., description="Number of faces found in uploaded photo")
+    photo_path: str = Field(..., description="Path where photo was saved")
+
+class VideoRecognitionFace(BaseModel):
+    person_id: int = Field(..., description="Person ID from database (negative for temporary unknown IDs)")
+    name: str = Field(..., description="Person's first name or Unknown #N")
+    last_name: Optional[str] = Field(None, description="Person's last name")
+    workplace: Optional[str] = Field(None, description="Person's workplace")
+    email: Optional[str] = Field(None, description="Person's email address")
+    phone: Optional[str] = Field(None, description="Person's phone number")
+    added_date: Optional[str] = Field(None, description="Date when person was added to database")
+    confidence: float = Field(..., description="Recognition confidence (0.0-1.0)")
+    timestamp: float = Field(..., description="Time in seconds when face was detected")
+    frame_number: int = Field(..., description="Frame number where face was detected")
+    location: FaceLocation = Field(..., description="Face coordinates on frame")
+
+class PersonAppearance(BaseModel):
+    person_id: int = Field(..., description="Person ID from database")
+    name: str = Field(..., description="Person's first name")
+    last_name: Optional[str] = Field(None, description="Person's last name")
+    workplace: Optional[str] = Field(None, description="Person's workplace")
+    email: Optional[str] = Field(None, description="Person's email address")
+    phone: Optional[str] = Field(None, description="Person's phone number")
+    first_seen: float = Field(..., description="First appearance timestamp in seconds")
+    last_seen: float = Field(..., description="Last appearance timestamp in seconds")
+    total_appearances: int = Field(..., description="Total number of appearances in video")
+
+class VideoKeyFrame(BaseModel):
+    frame_number: int = Field(..., description="Frame number")
+    timestamp: float = Field(..., description="Timestamp in seconds")
+    faces_count: int = Field(..., description="Number of faces in this frame")
+    image_base64: str = Field(..., description="Annotated frame image in Base64 format")
+
+class VideoRecognitionSummary(BaseModel):
+    total_frames: int = Field(..., description="Total frames in video")
+    processed_frames: int = Field(..., description="Number of frames processed")
+    fps: float = Field(..., description="Video frames per second")
+    duration_seconds: float = Field(..., description="Video duration in seconds")
+    unique_persons: int = Field(..., description="Number of unique persons detected")
+    person_appearances: Dict[str, PersonAppearance] = Field(..., description="Statistics for each detected person")
 
 class StatsData(BaseModel):
     total_persons: int
     last_added: Optional[dict] = None
 
 class ApiResponse(BaseModel):
-    success: bool
-    message: str
-    data: Optional[dict] = None
+    """Standard API response format"""
+    success: bool = Field(..., description="Operation success status")
+    message: str = Field(..., description="Human-readable message")
+    data: Optional[dict] = Field(None, description="Response data (structure depends on endpoint)")
 
 
 # Create FastAPI application
 app = FastAPI(
     title="Face Recognition API",
-    description="API for face recognition",
-    version="1.0.0"
+    description="API for face recognition with extended person profiles support. Recognizes faces in photos and videos, returns complete person information including name, last name, workplace, email, and phone.",
+    version="1.1.0",
+    docs_url="/docs",
+    redoc_url="/redoc"
 )
 
 # CORS setup for C# client compatibility
@@ -117,31 +167,57 @@ async def log_requests(request: Request, call_next):
     return response
 
 # Global variables
-CSV_FILE = "persons_data.csv"  # Changed to current directory
-UPLOAD_DIR = "uploads"  # Changed to current directory
-known_encodings = []
-known_names = []
-known_ids = []
+CSV_FILE = "persons_data.csv"  # Path to CSV database file
+UPLOAD_DIR = "uploads"  # Directory for uploaded photos
+
+# In-memory data storage for fast access
+known_encodings = []  # List of numpy arrays with face encodings
+known_names = []  # List of person names (first names only)
+known_ids = []  # List of person IDs
+known_persons_data = {}  # Dictionary mapping person_id to full person data (all fields)
 
 # Create necessary directories
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # Data models
 class PersonResponse(BaseModel):
-    id: int
-    name: str
-    last_name: Optional[str] = None
-    workplace: Optional[str] = None
-    email: Optional[str] = None
-    phone: Optional[str] = None
-    added_date: str
-    photo_path: str
+    """Complete person profile from database"""
+    id: int = Field(..., description="Person ID")
+    name: str = Field(..., description="First name")
+    last_name: Optional[str] = Field(None, description="Last name")
+    workplace: Optional[str] = Field(None, description="Workplace")
+    email: Optional[str] = Field(None, description="Email address")
+    phone: Optional[str] = Field(None, description="Phone number")
+    added_date: str = Field(..., description="Date added to database")
+    photo_path: str = Field(..., description="Path to person's photo")
 
 class RecognitionResult(BaseModel):
+    """Legacy model - not used in current version"""
     face_id: int
     name: str
     confidence: float
     location: dict
+
+# Helper function to get person data by ID
+def get_person_data_by_id(person_id: int) -> Optional[Dict]:
+    """
+    Get full person data from memory by ID.
+    
+    Args:
+        person_id: Person's database ID
+        
+    Returns:
+        Dictionary with person data or None if not found:
+        - id: Person ID
+        - name: First name
+        - last_name: Last name
+        - workplace: Workplace
+        - email: Email address
+        - phone: Phone number
+        - added_date: Date added to database
+        - photo_path: Path to person's photo
+    """
+    return known_persons_data.get(person_id)
 
 # Initialization
 def check_and_copy_old_data():
@@ -294,11 +370,22 @@ def init_csv():
         logger.info(f"CSV file already exists at {CSV_FILE}")
 
 def load_data():
-    """Load data from CSV"""
-    global known_encodings, known_names, known_ids
+    """
+    Load data from CSV file into memory.
+    
+    Loads:
+    - Face encodings into known_encodings list
+    - Names into known_names list
+    - IDs into known_ids list
+    - Full person profiles into known_persons_data dictionary
+    
+    Supports both old format (5 columns) and new format (9 columns) CSV files.
+    """
+    global known_encodings, known_names, known_ids, known_persons_data
     known_encodings = []
     known_names = []
     known_ids = []
+    known_persons_data = {}
     
     try:
         if os.path.exists(CSV_FILE):
@@ -313,13 +400,37 @@ def load_data():
                     row_count += 1
                     # Handle both old and new formats
                     if len(row) >= 9:  # New format
-                        person_id = int(row[0])
+                        person_id = int(row[0])  # Ensure it's Python int, not numpy
                         name = row[1]
                         encoding_str = row[8]
+                        
+                        # Store full person data
+                        known_persons_data[person_id] = {
+                            "id": person_id,
+                            "name": name,
+                            "last_name": row[2] if row[2] else None,
+                            "workplace": row[3] if row[3] else None,
+                            "email": row[4] if row[4] else None,
+                            "phone": row[5] if row[5] else None,
+                            "added_date": row[6],
+                            "photo_path": row[7]
+                        }
                     elif len(row) >= 5:  # Old format
-                        person_id = int(row[0])
+                        person_id = int(row[0])  # Ensure it's Python int, not numpy
                         name = row[1]
                         encoding_str = row[4]
+                        
+                        # Store minimal person data for old format
+                        known_persons_data[person_id] = {
+                            "id": person_id,
+                            "name": name,
+                            "last_name": None,
+                            "workplace": None,
+                            "email": None,
+                            "phone": None,
+                            "added_date": row[2],
+                            "photo_path": row[3]
+                        }
                     else:
                         logger.warning(f"Skipping invalid row: {row}")
                         continue
@@ -329,7 +440,7 @@ def load_data():
                             encoding = np.array(json.loads(encoding_str))
                             known_encodings.append(encoding)
                             known_names.append(name)
-                            known_ids.append(person_id)
+                            known_ids.append(person_id)  # Already converted to int above
                         except json.JSONDecodeError:
                             logger.error(f"Failed to decode encoding for {name} (ID: {person_id})")
                 
@@ -342,6 +453,29 @@ def load_data():
         logger.error(traceback.format_exc())
 
 # Helper functions
+def convert_numpy_types(obj):
+    """
+    Convert numpy types to Python native types for JSON serialization.
+    
+    Args:
+        obj: Object that may contain numpy types
+        
+    Returns:
+        Object with numpy types converted to Python types
+    """
+    if isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {key: convert_numpy_types(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_numpy_types(item) for item in obj]
+    else:
+        return obj
+
 def save_uploaded_file(upload_file: UploadFile) -> str:
     """Save uploaded file"""
     try:
@@ -454,19 +588,27 @@ if os.path.exists(CSV_FILE):
 # API Endpoints
 @app.get("/")
 async def root():
-    """Check API health"""
+    """Check API health and get endpoints info"""
     return {
         "status": "active",
         "service": "Face Recognition API",
-        "version": "1.0.0",
+        "version": "1.1.0",  # Updated version
         "current_state": api_state.current_state.value,
+        "features": [
+            "Full person data support (name, last name, workplace, email, phone)",
+            "Face recognition in photos and videos",
+            "Unknown face tracking in videos",
+            "Extended person profiles",
+            "Concurrent request protection"
+        ],
         "endpoints": {
-            "POST /api/person/add": "Add person",
-            "POST /api/person/recognize": "Recognize face",
-            "POST /api/video/recognize": "Recognize faces in video",
-            "GET /api/person/list": "List all people",
-            "GET /api/person/{id}": "Get person info",
-            "DELETE /api/person/{id}": "Delete person",
+            "POST /api/person/add": "Add person with extended profile",
+            "POST /api/person/recognize": "Recognize faces in photo (returns full person data)",
+            "POST /api/person/recognize-base64": "Recognize faces in base64 image (returns full person data)",
+            "POST /api/video/recognize": "Recognize faces in video (returns full person data)",
+            "GET /api/person/list": "List all people with full profiles",
+            "GET /api/person/{id}": "Get person info by ID",
+            "DELETE /api/person/{id}": "Delete person from database",
             "GET /api/stats": "System statistics",
             "GET /api/status": "Get processing status"
         }
@@ -541,6 +683,12 @@ async def debug_files():
             "sample_names": known_names[:3] if known_names else [],
             "sample_ids": known_ids[:3] if known_ids else []
         }
+        
+        return {
+            "success": True,
+            "message": "Debug information retrieved",
+            "data": debug_info
+        }
     except Exception as e:
         logger.error(f"Error during debug files check: {e}")
         return JSONResponse(
@@ -552,73 +700,6 @@ async def debug_files():
             }
         )
     
-@app.post("/api/migrate/old-data",
-          response_model=ApiResponse,
-          tags=["System"],
-          summary="Manually migrate data from old location")
-async def migrate_old_data():
-    """Manually copy data from old location (../persons_data.csv) to new location"""
-    try:
-        old_csv = "../persons_data.csv"
-        old_uploads = "../uploads"
-        
-        if not os.path.exists(old_csv):
-            return {
-                "success": False,
-                "message": "No old CSV file found at ../persons_data.csv",
-                "data": None
-            }
-        
-        # Backup current data if exists
-        if os.path.exists(CSV_FILE):
-            backup_name = f"persons_data_before_migration_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-            import shutil
-            shutil.copy2(CSV_FILE, backup_name)
-            logger.info(f"Backed up current CSV to {backup_name}")
-        
-        # Copy CSV file
-        import shutil
-        shutil.copy2(old_csv, CSV_FILE)
-        logger.info(f"Copied {old_csv} to {CSV_FILE}")
-        
-        # Copy uploads if they exist
-        copied_files = 0
-        if os.path.exists(old_uploads):
-            os.makedirs(UPLOAD_DIR, exist_ok=True)
-            for file in os.listdir(old_uploads):
-                old_file = os.path.join(old_uploads, file)
-                new_file = os.path.join(UPLOAD_DIR, file)
-                if os.path.isfile(old_file):
-                    shutil.copy2(old_file, new_file)
-                    copied_files += 1
-        
-        # Now migrate the CSV to new format and update paths
-        migrate_csv_if_needed()
-        
-        # Reload data
-        load_data()
-        
-        return {
-            "success": True,
-            "message": f"Successfully migrated data from old location. Copied {copied_files} image files.",
-            "data": {
-                "csv_copied": True,
-                "images_copied": copied_files,
-                "persons_loaded": len(known_names)
-            }
-        }
-        
-    except Exception as e:
-        logger.error(f"Error during manual migration: {e}")
-        return JSONResponse(
-            status_code=500,
-            content={
-                "success": False,
-                "message": f"Migration error: {str(e)}",
-                "data": None
-            }
-        )
-
 @app.post("/api/migrate/old-data",
           response_model=ApiResponse,
           tags=["System"],
@@ -732,12 +813,25 @@ async def add_person(
     face_encoding = face_recognition.face_encodings(image, face_locations)[0]
     
     # Генерируем ID
-    next_id = max(known_ids) + 1 if known_ids else 1
+    next_id = int(max(known_ids) + 1) if known_ids else 1  # Ensure Python int
     
     # Добавляем в память
     known_encodings.append(face_encoding)
     known_names.append(name)
     known_ids.append(next_id)
+    
+    # Сохраняем полные данные в память
+    person_data = {
+        "id": next_id,
+        "name": name,
+        "last_name": last_name,
+        "workplace": workplace,
+        "email": email,
+        "phone": phone,
+        "added_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "photo_path": file_path
+    }
+    known_persons_data[next_id] = person_data
     
     # Сохраняем в CSV с расширенными полями
     with open(CSV_FILE, 'a', newline='', encoding='utf-8') as f:
@@ -750,7 +844,7 @@ async def add_person(
             workplace or "",
             email or "",
             phone or "",
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            person_data["added_date"],
             file_path,
             encoding_str
         ])
@@ -777,11 +871,26 @@ async def add_person(
 @app.post("/api/person/recognize",
           response_model=ApiResponse,
           tags=["Recognition"],
-          summary="Recognize faces in photo")
+          summary="Recognize faces in photo with full person data")
 async def recognize_person(photo: UploadFile = File(..., description="Photo for recognition.")):
     """
-    Recognizes faces, draws bounding boxes and names on the photo,
-    and returns processed image and face feature vectors in Base64 format.
+    Recognizes faces in uploaded photo and returns full person information.
+    
+    Returns:
+    - Processed image with bounding boxes in Base64 format
+    - List of recognized faces with complete person data:
+      - person_id: Database ID (0 for unknown faces)
+      - name: First name
+      - last_name: Last name (if available)
+      - workplace: Workplace (if available)
+      - email: Email address (if available)
+      - phone: Phone number (if available)
+      - added_date: Date when person was added
+      - confidence: Recognition confidence score (0.0-1.0)
+      - location: Face bounding box coordinates
+      - encoding: 128-dimensional face feature vector
+      
+    Unknown faces will have person_id=0 and name="Unknown" with null values for other fields.
     """
     # Check if system is busy
     if api_state.current_state != ProcessingState.IDLE:
@@ -824,8 +933,19 @@ async def recognize_person(photo: UploadFile = File(..., description="Photo for 
             for i, (top, right, bottom, left) in enumerate(face_locations):
                 face_encoding = face_encodings[i]
                 
-                name = "Unknown"
-                color = (0, 0, 255) # Red color for unknown face bounding box
+                # Default values for unknown person
+                person_data = {
+                    "id": 0,
+                    "name": "Unknown",
+                    "last_name": None,
+                    "workplace": None,
+                    "email": None,
+                    "phone": None,
+                    "added_date": None,
+                    "photo_path": None
+                }
+                confidence = 0.0
+                color = (0, 0, 255)  # Red color for unknown face bounding box
                 
                 if known_encodings:
                     matches = face_recognition.compare_faces(known_encodings, face_encoding)
@@ -834,23 +954,54 @@ async def recognize_person(photo: UploadFile = File(..., description="Photo for 
                     if True in matches:
                         best_match_index = np.argmin(face_distances)
                         if matches[best_match_index]:
-                            name = known_names[best_match_index]
-                            color = (0, 255, 0) # Green color for known face bounding box
+                            person_id = known_ids[best_match_index]
+                            confidence = float(1 - face_distances[best_match_index])
+                            
+                            # Get full person data from memory
+                            full_person_data = get_person_data_by_id(person_id)
+                            if full_person_data:
+                                person_data = full_person_data.copy()
+                                color = (0, 255, 0)  # Green color for known face bounding box
+                            else:
+                                # Fallback if data not in memory (shouldn't happen)
+                                person_data["id"] = person_id
+                                person_data["name"] = known_names[best_match_index]
+                                color = (0, 255, 0)
 
-                # --- Draw on image (in BGR format) ---
+                # Draw on image (in BGR format)
                 cv2.rectangle(image_bgr, (left, top), (right, bottom), color, 2)
                 cv2.rectangle(image_bgr, (left, bottom - 35), (right, bottom), color, cv2.FILLED)
                 font = cv2.FONT_HERSHEY_DUPLEX
-                cv2.putText(image_bgr, name, (left + 6, bottom - 6), font, 1.0, (255, 255, 255), 1)
+                
+                # Display full name if last name exists
+                display_name = person_data["name"]
+                if person_data.get("last_name"):
+                    display_name += f" {person_data['last_name']}"
+                
+                cv2.putText(image_bgr, display_name, (left + 6, bottom - 6), font, 1.0, (255, 255, 255), 1)
 
-                # Collect result for this face
-                recognition_results.append({
-                    "name": name, 
-                    "location": {"top": top, "right": right, "bottom": bottom, "left": left},
+                # Collect result for this face with all person data
+                # Convert numpy types to Python types for JSON serialization
+                recognition_result = {
+                    "person_id": int(person_data["id"]),
+                    "name": person_data["name"],
+                    "last_name": person_data.get("last_name"),
+                    "workplace": person_data.get("workplace"),
+                    "email": person_data.get("email"),
+                    "phone": person_data.get("phone"),
+                    "added_date": person_data.get("added_date"),
+                    "confidence": round(float(confidence), 3),
+                    "location": {
+                        "top": int(top), 
+                        "right": int(right), 
+                        "bottom": int(bottom), 
+                        "left": int(left)
+                    },
                     "encoding": face_encoding.tolist()  # Add vector to response
-                })
+                }
+                recognition_results.append(recognition_result)
 
-            # --- Encode processed image to Base64 ---
+            # Encode processed image to Base64
             _, buffer = cv2.imencode('.jpg', image_bgr)
             processed_image_base64 = base64.b64encode(buffer).decode('utf-8')
 
@@ -1100,13 +1251,28 @@ async def get_stats():
 @app.post("/api/person/recognize-base64",
           response_model=ApiResponse,
           tags=["Recognition"],
-          summary="Recognize faces in base64 image")
+          summary="Recognize faces in base64 image with full person data")
 async def recognize_person_base64(image_base64: str = Form(...)):
     """
-    Recognize faces in base64 image
+    Recognize faces in base64-encoded image and return full person information.
     
     Parameters:
     - image_base64: Image in base64 format
+    
+    Returns:
+    - List of recognized faces with complete person data:
+      - face_id: Sequential face number in this image (1, 2, 3...)
+      - person_id: Database ID (0 for unknown faces)
+      - name: First name
+      - last_name: Last name (if available)
+      - workplace: Workplace (if available)
+      - email: Email address (if available)
+      - phone: Phone number (if available)
+      - added_date: Date when person was added
+      - confidence: Recognition confidence score (0.0-1.0)
+      - location: Face bounding box coordinates
+      
+    Note: This endpoint does not return processed image or face encodings.
     """
     # Check if system is busy
     if api_state.current_state != ProcessingState.IDLE:
@@ -1149,8 +1315,17 @@ async def recognize_person_base64(image_base64: str = Form(...)):
             results = []
             
             for i, (face_encoding, face_location) in enumerate(zip(face_encodings, face_locations)):
-                person_id = 0
-                name = "Unknown"
+                # Default values for unknown person
+                person_data = {
+                    "id": 0,
+                    "name": "Unknown",
+                    "last_name": None,
+                    "workplace": None,
+                    "email": None,
+                    "phone": None,
+                    "added_date": None,
+                    "photo_path": None
+                }
                 confidence = 0.0
                 
                 if len(known_encodings) > 0:
@@ -1161,21 +1336,30 @@ async def recognize_person_base64(image_base64: str = Form(...)):
                         best_match_index = np.argmin(face_distances)
                         if matches[best_match_index]:
                             person_id = known_ids[best_match_index]
-                            name = known_names[best_match_index]
                             confidence = float(1 - face_distances[best_match_index])
+                            
+                            # Get full person data from memory
+                            full_person_data = get_person_data_by_id(person_id)
+                            if full_person_data:
+                                person_data = full_person_data.copy()
                 
                 top, right, bottom, left = face_location
                 
                 results.append({
                     "face_id": i + 1,
-                    "person_id": person_id,
-                    "name": name,
-                    "confidence": round(confidence, 3),
+                    "person_id": int(person_data["id"]),
+                    "name": person_data["name"],
+                    "last_name": person_data.get("last_name"),
+                    "workplace": person_data.get("workplace"),
+                    "email": person_data.get("email"),
+                    "phone": person_data.get("phone"),
+                    "added_date": person_data.get("added_date"),
+                    "confidence": round(float(confidence), 3),
                     "location": {
-                        "top": top,
-                        "right": right,
-                        "bottom": bottom,
-                        "left": left
+                        "top": int(top),
+                        "right": int(right),
+                        "bottom": int(bottom),
+                        "left": int(left)
                     }
                 })
             
@@ -1198,13 +1382,47 @@ async def recognize_person_base64(image_base64: str = Form(...)):
 @app.post("/api/video/recognize",
           response_model=ApiResponse,
           tags=["Recognition"],
-          summary="Recognize faces in video")
+          summary="Recognize faces in video with full person data")
 @check_api_state(ProcessingState.PROCESSING_VIDEO)
 async def recognize_video(
     video: UploadFile = File(..., description="Video file for recognition (MP4, AVI, MOV)"),
     frame_interval: int = Form(15, description="Process every Nth frame (default 15)")
 ):
-    """Recognizes faces in video with proper state management"""
+    """
+    Recognizes faces in video file and returns complete person information for each detection.
+    
+    Parameters:
+    - video: Video file (MP4, AVI, MOV formats supported)
+    - frame_interval: Process every Nth frame (default: 15)
+    
+    Returns:
+    - summary: Video processing statistics including:
+      - total_frames: Total number of frames in video
+      - processed_frames: Number of frames actually processed
+      - fps: Video frame rate
+      - duration_seconds: Video duration
+      - unique_persons: Number of unique faces detected
+      - person_appearances: Dictionary with full data for each person:
+        - person_id: Database ID (negative for temporary unknown IDs)
+        - name, last_name, workplace, email, phone: Person details
+        - first_seen: First appearance timestamp
+        - last_seen: Last appearance timestamp
+        - total_appearances: Number of detections
+    
+    - key_frames: Up to 10 annotated frames as Base64 images
+    
+    - detections: List of all face detections (limited to first 100) with:
+      - Full person data (all fields from database)
+      - confidence: Recognition confidence
+      - timestamp: Time in video when detected
+      - frame_number: Frame where face was found
+      - location: Face bounding box
+    
+    Notes:
+    - Unknown faces are assigned temporary negative IDs (e.g., -1, -2)
+    - Unknown faces are labeled as "Unknown #1", "Unknown #2", etc.
+    - Processing large videos may take several minutes
+    """
     # Сохраняем видео файл
     video_path = save_uploaded_file(video)
     logger.info(f"Processing video: {video_path}")
@@ -1225,6 +1443,7 @@ async def recognize_video(
     
     # Временное хранилище для неизвестных лиц
     temp_unknown_encodings = []
+    temp_unknown_id_counter = 1
     person_appearances = {}
     
     # Результаты распознавания
@@ -1258,9 +1477,20 @@ async def recognize_video(
                     frame_results = []
                     
                     for face_encoding, face_location in zip(face_encodings, face_locations):
-                        name = "Unknown"
+                        # Default values for unknown person
+                        person_data = {
+                            "id": 0,
+                            "name": "Unknown",
+                            "last_name": None,
+                            "workplace": None,
+                            "email": None,
+                            "phone": None,
+                            "added_date": None,
+                            "photo_path": None
+                        }
                         confidence = 0.0
                         color = (0, 0, 255)  # Красный для неизвестного
+                        unknown_id = None
                         
                         if known_encodings:
                             matches = face_recognition.compare_faces(known_encodings, face_encoding)
@@ -1269,57 +1499,97 @@ async def recognize_video(
                             if True in matches:
                                 best_match_index = np.argmin(face_distances)
                                 if matches[best_match_index]:
-                                    name = known_names[best_match_index]
+                                    person_id = known_ids[best_match_index]
                                     confidence = float(1 - face_distances[best_match_index])
                                     color = (0, 255, 0)  # Зеленый для известного
+                                    
+                                    # Get full person data from memory
+                                    full_person_data = get_person_data_by_id(person_id)
+                                    if full_person_data:
+                                        person_data = full_person_data.copy()
                         
-                        if name == "Unknown":
+                        if person_data["name"] == "Unknown":
                             # Проверяем среди временных неизвестных
                             if temp_unknown_encodings:
                                 unknown_distances = face_recognition.face_distance(temp_unknown_encodings, face_encoding)
                                 best_match_index = np.argmin(unknown_distances)
                                 if unknown_distances[best_match_index] < 0.6:
-                                    name = f"Unknown #{best_match_index + 1}"
+                                    unknown_id = best_match_index + 1
+                                    person_data["name"] = f"Unknown #{unknown_id}"
                                 else:
                                     temp_unknown_encodings.append(face_encoding)
-                                    name = f"Unknown #{len(temp_unknown_encodings)}"
+                                    unknown_id = len(temp_unknown_encodings)
+                                    person_data["name"] = f"Unknown #{unknown_id}"
                             else:
                                 temp_unknown_encodings.append(face_encoding)
-                                name = f"Unknown #1"
+                                unknown_id = 1
+                                person_data["name"] = f"Unknown #1"
+                            
+                            # Set temporary negative ID for unknowns
+                            person_data["id"] = -int(unknown_id)  # Ensure Python int
                         
                         # Рисуем рамку и имя
                         top, right, bottom, left = face_location
                         cv2.rectangle(annotated_frame, (left, top), (right, bottom), color, 2)
                         cv2.rectangle(annotated_frame, (left, bottom - 35), (right, bottom), color, cv2.FILLED)
-                        cv2.putText(annotated_frame, name, (left + 6, bottom - 6),
+                        
+                        # Display full name if last name exists
+                        display_name = person_data["name"]
+                        if person_data.get("last_name"):
+                            display_name += f" {person_data['last_name']}"
+                        
+                        cv2.putText(annotated_frame, display_name, (left + 6, bottom - 6),
                                   cv2.FONT_HERSHEY_DUPLEX, 0.6, (255, 255, 255), 1)
                         
-                        # Сохраняем результат
+                        # Сохраняем результат с полными данными
                         timestamp = frame_count / fps
-                        frame_results.append({
-                            "name": name,
-                            "confidence": round(confidence, 3),
-                            "timestamp": round(timestamp, 2),
-                            "frame_number": frame_count
-                        })
+                        frame_result = {
+                            "person_id": int(person_data["id"]),
+                            "name": person_data["name"],
+                            "last_name": person_data.get("last_name"),
+                            "workplace": person_data.get("workplace"),
+                            "email": person_data.get("email"),
+                            "phone": person_data.get("phone"),
+                            "added_date": person_data.get("added_date"),
+                            "confidence": round(float(confidence), 3),
+                            "timestamp": round(float(timestamp), 2),
+                            "frame_number": int(frame_count),
+                            "location": {
+                                "top": int(top),
+                                "right": int(right),
+                                "bottom": int(bottom),
+                                "left": int(left)
+                            }
+                        }
+                        frame_results.append(frame_result)
                         
                         # Отслеживаем уникальные появления
-                        if name not in person_appearances:
-                            person_appearances[name] = {
-                                "first_seen": timestamp,
-                                "last_seen": timestamp,
+                        person_key = person_data["name"]
+                        if person_data.get("last_name"):
+                            person_key += f" {person_data['last_name']}"
+                            
+                        if person_key not in person_appearances:
+                            person_appearances[person_key] = {
+                                "person_id": int(person_data["id"]),
+                                "name": person_data["name"],
+                                "last_name": person_data.get("last_name"),
+                                "workplace": person_data.get("workplace"),
+                                "email": person_data.get("email"),
+                                "phone": person_data.get("phone"),
+                                "first_seen": float(timestamp),
+                                "last_seen": float(timestamp),
                                 "total_appearances": 0
                             }
-                        person_appearances[name]["last_seen"] = timestamp
-                        person_appearances[name]["total_appearances"] += 1
+                        person_appearances[person_key]["last_seen"] = float(timestamp)
+                        person_appearances[person_key]["total_appearances"] += 1
                     
                     # Сохраняем ключевой кадр
                     if processed_frames % 5 == 0 and len(key_frames) < 10:
                         _, buffer = cv2.imencode('.jpg', annotated_frame)
                         key_frame_base64 = base64.b64encode(buffer).decode('utf-8')
                         key_frames.append({
-                            "frame_number": frame_count,
-                            "timestamp": round(frame_count / fps, 2),
+                            "frame_number": int(frame_count),
+                            "timestamp": round(float(frame_count / fps), 2),
                             "faces_count": len(face_locations),
                             "image_base64": key_frame_base64
                         })
@@ -1342,18 +1612,24 @@ async def recognize_video(
     
     logger.info(f"Processing completed. Found {len(person_appearances)} unique faces")
     
-    # Формируем итоговую статистику
+    # Формируем итоговую статистику с полными данными
     summary = {
-        "total_frames": total_frames,
-        "processed_frames": frame_count // frame_interval if frame_interval > 0 else 0,
-        "fps": round(fps, 2),
-        "duration_seconds": round(total_frames / fps, 2) if fps > 0 else 0,
+        "total_frames": int(total_frames),
+        "processed_frames": int(frame_count // frame_interval) if frame_interval > 0 else 0,
+        "fps": round(float(fps), 2),
+        "duration_seconds": round(float(total_frames / fps), 2) if fps > 0 else 0,
         "unique_persons": len(person_appearances),
         "person_appearances": {
             name: {
-                "first_seen": round(data["first_seen"], 2),
-                "last_seen": round(data["last_seen"], 2),
-                "total_appearances": data["total_appearances"]
+                "person_id": int(data["person_id"]),
+                "name": data["name"],
+                "last_name": data.get("last_name"),
+                "workplace": data.get("workplace"),
+                "email": data.get("email"),
+                "phone": data.get("phone"),
+                "first_seen": round(float(data["first_seen"]), 2),
+                "last_seen": round(float(data["last_seen"]), 2),
+                "total_appearances": int(data["total_appearances"])
             }
             for name, data in person_appearances.items()
         }
